@@ -1,0 +1,26 @@
+[project]
+name = "solar-filaments-detection"
+version = "0.1.0"
+description = "YOLO11 (detect) -> crop -> U-Net pipeline for the Solar Filament Segmentation Challenge 2026 (MAGFiLO)"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "opencv-python-headless",
+    "matplotlib",
+    "pandas",
+    "torch",
+    "ultralytics",
+    "pycocotools",
+    "pyyaml",
+    "tqdm",
+]
+
+[project.scripts]
+filament = "solar_filaments.cli.main:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

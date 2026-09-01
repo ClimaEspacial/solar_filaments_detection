@@ -1,3 +1,9 @@
+# Project-specific: local runs, checkpoints, downloaded data
+/work/
+*.pt
+*.pth
+kaggle.json
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
