@@ -17,6 +17,8 @@ import torch
 from torch.utils.data import Dataset as TorchDataset
 
 from solar_filaments.data.coco import Dataset, load_image, polygon_to_mask
+from solar_filaments.data.oriented_crop import (apply_affine_points, crop_patch_with_padding,
+                                                 patch_half_size, pca_angle_deg, rotation_matrix)
 
 
 def padded_rect_crop(x: float, y: float, w: float, h: float, W: int, H: int,
@@ -51,15 +53,52 @@ def undo_letterbox(canvas: np.ndarray, scale: float, left: int, top: int,
     return cv2.resize(cropped, (orig_w, orig_h), interpolation=interp)
 
 
+def spine_oriented_sample(img: np.ndarray, segmentation, spine, crop_size: int,
+                           pad_factor: float, min_crop_side: int):
+    """Crop+letterbox a filament rotated so its GT spine lies horizontal,
+    instead of a plain axis-aligned bbox crop. Uses the spine polyline's
+    principal axis for the angle and the segmentation polygon (rotated along
+    with the image) for the exact tight bbox and mask - see oriented_crop.py."""
+    poly = np.asarray(segmentation, dtype=np.float32).reshape(-1, 2)
+    spine_pts = np.asarray(spine, dtype=np.float32).reshape(-1, 2)
+    centroid = poly.mean(axis=0)
+    angle = pca_angle_deg(spine_pts)
+
+    diag = float(np.linalg.norm(poly.max(axis=0) - poly.min(axis=0)))
+    half = patch_half_size(diag)
+    patch, off_x, off_y = crop_patch_with_padding(img, centroid[0], centroid[1], half)
+
+    local_center = (centroid[0] - off_x, centroid[1] - off_y)
+    M = rotation_matrix(local_center, angle)
+    rotated = cv2.warpAffine(patch, M, (patch.shape[1], patch.shape[0]), flags=cv2.INTER_LINEAR)
+
+    poly_rot = apply_affine_points(poly - np.array([off_x, off_y], dtype=np.float32), M)
+    mask_rot = np.zeros(rotated.shape, dtype=np.uint8)
+    cv2.fillPoly(mask_rot, [poly_rot.round().astype(np.int32)], 1)
+
+    bx1, by1 = poly_rot.min(axis=0)
+    bx2, by2 = poly_rot.max(axis=0)
+    cx1, cy1, cx2, cy2 = padded_rect_crop(bx1, by1, bx2 - bx1, by2 - by1,
+                                           rotated.shape[1], rotated.shape[0], pad_factor, min_crop_side)
+    crop = rotated[cy1:cy2, cx1:cx2]
+    mask = mask_rot[cy1:cy2, cx1:cx2]
+
+    crop, _, _, _ = letterbox_resize(crop, crop_size, cv2.INTER_LINEAR)
+    mask, _, _, _ = letterbox_resize(mask, crop_size, cv2.INTER_NEAREST)
+    return crop, mask
+
+
 class FilamentCropDataset(TorchDataset):
     def __init__(self, dataset: Dataset, train_img_dir, image_ids, crop_size: int,
-                 pad_factor: float, min_crop_side: int, augment: bool = False):
+                 pad_factor: float, min_crop_side: int, augment: bool = False,
+                 use_spine_orientation: bool = False):
         self.dataset = dataset
         self.train_img_dir = train_img_dir
         self.crop_size = crop_size
         self.pad_factor = pad_factor
         self.min_crop_side = min_crop_side
         self.augment = augment
+        self.use_spine_orientation = use_spine_orientation
         self.samples = [
             (img_id, ann)
             for img_id in image_ids
@@ -80,25 +119,31 @@ class FilamentCropDataset(TorchDataset):
         img_id, ann = self.samples[idx]
         img = self._get_image(img_id)
         H, W = img.shape
-        full_mask = polygon_to_mask(ann["segmentation"], H, W)
 
-        x, y, w, h = ann["bbox"]
-        x1, y1, x2, y2 = padded_rect_crop(x, y, w, h, W, H, self.pad_factor, self.min_crop_side)
-        crop = img[y1:y2, x1:x2]
-        mask = full_mask[y1:y2, x1:x2]
-
-        crop, _, _, _ = letterbox_resize(crop, self.crop_size, cv2.INTER_LINEAR)
-        mask, _, _, _ = letterbox_resize(mask, self.crop_size, cv2.INTER_NEAREST)
+        if self.use_spine_orientation:
+            crop, mask = spine_oriented_sample(img, ann["segmentation"], ann["spine"],
+                                                self.crop_size, self.pad_factor, self.min_crop_side)
+        else:
+            full_mask = polygon_to_mask(ann["segmentation"], H, W)
+            x, y, w, h = ann["bbox"]
+            x1, y1, x2, y2 = padded_rect_crop(x, y, w, h, W, H, self.pad_factor, self.min_crop_side)
+            crop = img[y1:y2, x1:x2]
+            mask = full_mask[y1:y2, x1:x2]
+            crop, _, _, _ = letterbox_resize(crop, self.crop_size, cv2.INTER_LINEAR)
+            mask, _, _, _ = letterbox_resize(mask, self.crop_size, cv2.INTER_NEAREST)
 
         if self.augment:
             if random.random() < 0.5:
                 crop, mask = crop[:, ::-1].copy(), mask[:, ::-1].copy()
             if random.random() < 0.5:
                 crop, mask = crop[::-1, :].copy(), mask[::-1, :].copy()
-            k = random.choice([0, 1, 2, 3])
-            if k:
-                crop = np.rot90(crop, k).copy()
-                mask = np.rot90(mask, k).copy()
+            if not self.use_spine_orientation:
+                # a 90-degree rotation would undo the whole point of a canonical
+                # spine-horizontal orientation, so skip it in that mode.
+                k = random.choice([0, 1, 2, 3])
+                if k:
+                    crop = np.rot90(crop, k).copy()
+                    mask = np.rot90(mask, k).copy()
             if random.random() < 0.3:
                 gain = random.uniform(0.85, 1.15)
                 bias = random.uniform(-10, 10)

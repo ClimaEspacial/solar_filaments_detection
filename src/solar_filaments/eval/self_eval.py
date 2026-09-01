@@ -232,7 +232,8 @@ def build_val_gt_pred_dataframes(dataset: Dataset, train_img_dir: Path, image_id
             imgsz=inference_cfg.imgsz, crop_size=crop_cfg.crop_size,
             pad_factor=crop_cfg.pad_factor, min_crop_side=crop_cfg.min_crop_side,
             mask_thresh=inference_cfg.mask_thresh, min_instance_area=inference_cfg.min_instance_area,
-            mask_nms_thresh=inference_cfg.mask_nms_thresh,
+            mask_nms_thresh=inference_cfg.mask_nms_thresh, mask_conf_thres=inference_cfg.mask_conf_thres,
+            use_spine_orientation=crop_cfg.use_spine_orientation,
         )
         stem_rows = []
         for inst_id in range(1, int(label_map.max()) + 1):

@@ -61,6 +61,10 @@ class CropConfig:
     crop_size: int = 256
     pad_factor: float = 1.35
     min_crop_side: int = 48
+    # rotate the crop so the filament's spine lies horizontal before letterboxing,
+    # instead of a plain axis-aligned bbox crop. A U-Net trained with this on must
+    # also be run with this on at inference (see inference.py) - they're paired.
+    use_spine_orientation: bool = False
 
 
 @dataclass
@@ -96,6 +100,11 @@ class InferenceConfig:
     # tuned on val (at conf_thres=0.35): 0.6->PQ 0.430, 0.4->0.433, 0.25->0.438 (plateau;
     # 0.15 and 0.1 give the identical 387 preds / 0.4381 - nothing left to suppress below this).
     mask_nms_thresh: float = 0.25
+    # min mean U-Net probability inside a candidate's own thresholded mask;
+    # 0.0 = disabled (no filtering). Meant to be swept alongside a *lower*
+    # conf_thres than 0.35, to recover recall without the precision hit that
+    # lowering conf_thres alone caused (see notebook history for that sweep).
+    mask_conf_thres: float = 0.0
 
 
 SEED = 42

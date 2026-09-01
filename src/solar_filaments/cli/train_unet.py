@@ -20,6 +20,10 @@ def add_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--no-edge-attention", action="store_true")
     parser.add_argument("--crop-size", type=int, default=crop_cfg.crop_size)
     parser.add_argument("--num-workers", type=int, default=cfg.num_workers)
+    parser.add_argument("--spine-orientation", action="store_true",
+                         help="rotate crops so the GT spine lies horizontal, instead of axis-aligned bbox crops "
+                              "(saves to a separate unet_spine_best.pt - pair with --spine-orientation at "
+                              "evaluate/predict time too)")
 
 
 def run(args: argparse.Namespace) -> None:
@@ -31,13 +35,13 @@ def run(args: argparse.Namespace) -> None:
     dataset = Dataset(paths.train_ann_path)
     train_ids, val_ids = load_split(paths.split_path)
 
-    crop_cfg = CropConfig(crop_size=args.crop_size)
+    crop_cfg = CropConfig(crop_size=args.crop_size, use_spine_orientation=args.spine_orientation)
     train_crop_ds = FilamentCropDataset(dataset, paths.train_img_dir, train_ids,
                                          crop_cfg.crop_size, crop_cfg.pad_factor, crop_cfg.min_crop_side,
-                                         augment=True)
+                                         augment=True, use_spine_orientation=crop_cfg.use_spine_orientation)
     val_crop_ds = FilamentCropDataset(dataset, paths.train_img_dir, val_ids,
                                        crop_cfg.crop_size, crop_cfg.pad_factor, crop_cfg.min_crop_side,
-                                       augment=False)
+                                       augment=False, use_spine_orientation=crop_cfg.use_spine_orientation)
     print(f"train crops: {len(train_crop_ds)}  val crops: {len(val_crop_ds)}")
 
     train_loader = DataLoader(train_crop_ds, batch_size=args.batch_size, shuffle=True,
@@ -53,7 +57,8 @@ def run(args: argparse.Namespace) -> None:
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
     scaler = torch.amp.GradScaler(device.type, enabled=device.type == "cuda")
 
-    ckpt_path = paths.ckpt_dir / "unet_best.pt"
+    ckpt_name = "unet_spine_best.pt" if args.spine_orientation else "unet_best.pt"
+    ckpt_path = paths.ckpt_dir / ckpt_name
     best_val_dice = 0.0
     for epoch in range(args.epochs):
         model.train()
