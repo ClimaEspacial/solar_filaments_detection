@@ -24,6 +24,10 @@ def add_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--obb", action="store_true",
                          help="train an oriented-bounding-box detector on the OBB dataset "
                               "(from `filament prepare --obb`) instead of axis-aligned boxes")
+    parser.add_argument("--normalize", action="store_true",
+                         help="train on the limb-darkening-flattened + CLAHE-preprocessed dataset "
+                              "(from `filament prepare --normalize`) instead of raw images - "
+                              "not combinable with --obb this round")
 
 
 def run(args: argparse.Namespace) -> None:
@@ -31,20 +35,28 @@ def run(args: argparse.Namespace) -> None:
     paths.ensure()
     cfg = YoloConfig()
 
+    if args.obb and args.normalize:
+        raise ValueError("--obb and --normalize can't be combined this round")
+
     device = args.device
     if device is None:
         device = 0 if torch.cuda.is_available() else "cpu"
 
-    base_name = f"{cfg.name}_obb" if args.obb else cfg.name
+    base_name = f"{cfg.name}_obb" if args.obb else (f"{cfg.name}_norm" if args.normalize else cfg.name)
     name = args.name or (f"{base_name}_fold{args.fold}" if args.fold is not None else base_name)
     weights = args.weights or ("yolo11s-obb.pt" if args.obb else cfg.base_weights)
 
-    yolo_dir = paths.yolo_obb_dir_for(args.fold) if args.obb else paths.yolo_dir_for(args.fold)
+    if args.obb:
+        yolo_dir = paths.yolo_obb_dir_for(args.fold)
+    elif args.normalize:
+        yolo_dir = paths.yolo_norm_dir_for(args.fold)
+    else:
+        yolo_dir = paths.yolo_dir_for(args.fold)
     data_yaml = yolo_dir / "data.yaml"
     if not data_yaml.exists():
-        obb_hint = " --obb" if args.obb else ""
+        hint = " --obb" if args.obb else (" --normalize" if args.normalize else "")
         fold_hint = f" --k-folds ..." if args.fold is not None else ""
-        raise FileNotFoundError(f"{data_yaml} not found - run `filament prepare{obb_hint}{fold_hint}` first")
+        raise FileNotFoundError(f"{data_yaml} not found - run `filament prepare{hint}{fold_hint}` first")
 
     model = YOLO(weights)
 

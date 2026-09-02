@@ -30,25 +30,39 @@ def add_args(parser: argparse.ArgumentParser) -> None:
                          help="use an OBB-trained detector + matching U-Net (single-pass rotated crop, "
                               "no bootstrap) instead of axis-aligned - default weights become "
                               "<yolo-name>_obb / unet_obb_best.pt")
+    parser.add_argument("--instance-norm", action="store_true",
+                         help="load a U-Net trained with --instance-norm (default unet-weights becomes "
+                              "*_in_best.pt) and construct it with matching InstanceNorm layers")
+    parser.add_argument("--normalize", action="store_true",
+                         help="use limb-darkening-flattened + CLAHE-preprocessed images at inference and load "
+                              "*_norm-suffixed weights - not combinable with --obb this round")
     parser.add_argument("--fold", type=int, default=None,
                          help="use this fold's weights (from `filament prepare --k-folds`); "
                               "default: no fold suffix (the single-split model)")
 
 
 def run(args: argparse.Namespace) -> None:
+    if args.normalize and args.obb:
+        raise ValueError("--normalize and --obb can't be combined this round")
+
     paths = Paths()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    base_name = f"{YoloConfig().name}_obb" if args.obb else YoloConfig().name
+    base_name = f"{YoloConfig().name}_obb" if args.obb else (f"{YoloConfig().name}_norm" if args.normalize else YoloConfig().name)
     yolo_name = f"{base_name}_fold{args.fold}" if args.fold is not None else base_name
     unet_stem = "unet_obb" if args.obb else ("unet_spine" if args.spine_orientation else "unet")
+    if args.normalize:
+        unet_stem += "_norm"
+    if args.instance_norm:
+        unet_stem += "_in"
     default_unet_name = f"{unet_stem}_fold{args.fold}_best.pt" if args.fold is not None else f"{unet_stem}_best.pt"
     yolo_weights = args.yolo_weights or str(paths.runs_dir / yolo_name / "weights" / "best.pt")
     unet_weights = args.unet_weights or str(paths.ckpt_dir / default_unet_name)
     out_path = args.out or str(paths.work_dir / "submission.csv")
 
     yolo_model = YOLO(yolo_weights)
-    unet_model = EdgeAttUNet(use_edge_attention=UNetConfig().use_edge_attention).to(device)
+    norm_layer = "instance" if args.instance_norm else "batch"
+    unet_model = EdgeAttUNet(use_edge_attention=UNetConfig().use_edge_attention, norm_layer=norm_layer).to(device)
     unet_model.load_state_dict(torch.load(unet_weights, map_location=device))
     unet_model.eval()
 
@@ -80,6 +94,7 @@ def run(args: argparse.Namespace) -> None:
                 mask_thresh=inference_cfg.mask_thresh, min_instance_area=inference_cfg.min_instance_area,
                 mask_nms_thresh=inference_cfg.mask_nms_thresh, mask_conf_thres=inference_cfg.mask_conf_thres,
                 use_spine_orientation=crop_cfg.use_spine_orientation, min_elongation=inference_cfg.min_elongation,
+                preprocess=args.normalize,
             )
         for inst_id in range(1, int(label_map.max()) + 1):
             mask = label_map == inst_id

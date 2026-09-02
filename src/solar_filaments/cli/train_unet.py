@@ -31,9 +31,20 @@ def add_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--fold", type=int, default=None,
                          help="train on this fold's data (from `filament prepare --k-folds`); "
                               "default checkpoint name becomes unet_fold<N>_best.pt")
+    parser.add_argument("--instance-norm", action="store_true",
+                         help="use InstanceNorm instead of BatchNorm in the U-Net (arXiv:2607.24525) - "
+                              "saves to a _in-suffixed checkpoint; pair with --instance-norm at "
+                              "evaluate/predict time too")
+    parser.add_argument("--normalize", action="store_true",
+                         help="train on limb-darkening-flattened + CLAHE-preprocessed crops instead of raw - "
+                              "saves to a _norm-suffixed checkpoint; pair with --normalize at evaluate/predict "
+                              "time too. Not combinable with --obb this round")
 
 
 def run(args: argparse.Namespace) -> None:
+    if args.normalize and args.obb:
+        raise ValueError("--normalize and --obb can't be combined this round")
+
     paths = Paths()
     paths.ensure()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -49,12 +60,12 @@ def run(args: argparse.Namespace) -> None:
                                          crop_cfg.crop_size, crop_cfg.pad_factor, crop_cfg.min_crop_side,
                                          augment=True, use_spine_orientation=crop_cfg.use_spine_orientation,
                                          use_obb_orientation=crop_cfg.use_obb_orientation,
-                                         synthetic_img_dir=synthetic_img_dir)
+                                         synthetic_img_dir=synthetic_img_dir, preprocess=args.normalize)
     val_crop_ds = FilamentCropDataset(dataset, paths.train_img_dir, val_ids,
                                        crop_cfg.crop_size, crop_cfg.pad_factor, crop_cfg.min_crop_side,
                                        augment=False, use_spine_orientation=crop_cfg.use_spine_orientation,
                                        use_obb_orientation=crop_cfg.use_obb_orientation,
-                                       synthetic_img_dir=synthetic_img_dir)
+                                       synthetic_img_dir=synthetic_img_dir, preprocess=args.normalize)
     print(f"train crops: {len(train_crop_ds)}  val crops: {len(val_crop_ds)}")
 
     train_loader = DataLoader(train_crop_ds, batch_size=args.batch_size, shuffle=True,
@@ -62,7 +73,9 @@ def run(args: argparse.Namespace) -> None:
     val_loader = DataLoader(val_crop_ds, batch_size=args.batch_size, shuffle=False,
                              num_workers=args.num_workers, pin_memory=True)
 
-    model = EdgeAttUNet(base=args.base_channels, use_edge_attention=not args.no_edge_attention).to(device)
+    norm_layer = "instance" if args.instance_norm else "batch"
+    model = EdgeAttUNet(base=args.base_channels, use_edge_attention=not args.no_edge_attention,
+                         norm_layer=norm_layer).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"U-Net parameters: {n_params / 1e6:.2f}M")
 
@@ -70,7 +83,12 @@ def run(args: argparse.Namespace) -> None:
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
     scaler = torch.amp.GradScaler(device.type, enabled=device.type == "cuda")
 
-    ckpt_name = "unet_obb_best.pt" if args.obb else ("unet_spine_best.pt" if args.spine_orientation else "unet_best.pt")
+    ckpt_stem = "unet_obb" if args.obb else ("unet_spine" if args.spine_orientation else "unet")
+    if args.normalize:
+        ckpt_stem += "_norm"
+    if args.instance_norm:
+        ckpt_stem += "_in"
+    ckpt_name = f"{ckpt_stem}_best.pt"
     if args.fold is not None:
         ckpt_name = ckpt_name.replace("_best.pt", f"_fold{args.fold}_best.pt")
     ckpt_path = paths.ckpt_dir / ckpt_name

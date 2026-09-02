@@ -45,6 +45,10 @@ class Paths:
         return self.work_dir / "yolo_obb_dataset"
 
     @property
+    def yolo_norm_dir(self) -> Path:
+        return self.work_dir / "yolo_norm_dataset"
+
+    @property
     def ckpt_dir(self) -> Path:
         return self.work_dir / "checkpoints"
 
@@ -76,6 +80,9 @@ class Paths:
 
     def yolo_obb_dir_for(self, fold: Optional[int]) -> Path:
         return self.yolo_obb_dir if fold is None else self.yolo_obb_dir / f"fold{fold}"
+
+    def yolo_norm_dir_for(self, fold: Optional[int]) -> Path:
+        return self.yolo_norm_dir if fold is None else self.yolo_norm_dir / f"fold{fold}"
 
     def synthetic_img_dir_for(self, fold: Optional[int]) -> Path:
         return self.synthetic_img_dir if fold is None else self.synthetic_img_dir / f"fold{fold}"

@@ -39,6 +39,12 @@ def add_args(parser: argparse.ArgumentParser) -> None:
                          help="use an OBB-trained detector + matching U-Net (single-pass rotated crop, "
                               "no bootstrap) instead of axis-aligned - default weights become "
                               "<yolo-name>_obb / unet_obb_best.pt")
+    parser.add_argument("--instance-norm", action="store_true",
+                         help="load a U-Net trained with --instance-norm (default unet-weights becomes "
+                              "*_in_best.pt) and construct it with matching InstanceNorm layers")
+    parser.add_argument("--normalize", action="store_true",
+                         help="use limb-darkening-flattened + CLAHE-preprocessed images at inference and load "
+                              "*_norm-suffixed weights - not combinable with --obb this round")
     parser.add_argument("--fold", default=None,
                          help="evaluate this fold (int, from `filament prepare --k-folds`), or 'all' to pool "
                               "out-of-fold PQ across every fold's own held-out val set")
@@ -72,9 +78,13 @@ def add_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _default_weights(paths: Paths, args: argparse.Namespace, fold):
-    base_name = f"{YoloConfig().name}_obb" if args.obb else YoloConfig().name
+    base_name = f"{YoloConfig().name}_obb" if args.obb else (f"{YoloConfig().name}_norm" if args.normalize else YoloConfig().name)
     name = f"{base_name}_fold{fold}" if fold is not None else base_name
     unet_stem = "unet_obb" if args.obb else ("unet_spine" if args.spine_orientation else "unet")
+    if args.normalize:
+        unet_stem += "_norm"
+    if args.instance_norm:
+        unet_stem += "_in"
     unet_name = f"{unet_stem}_fold{fold}_best.pt" if fold is not None else f"{unet_stem}_best.pt"
     yolo_weights = args.yolo_weights or str(paths.runs_dir / name / "weights" / "best.pt")
     unet_weights = args.unet_weights or str(paths.ckpt_dir / unet_name)
@@ -84,7 +94,8 @@ def _default_weights(paths: Paths, args: argparse.Namespace, fold):
 def _load_models(paths: Paths, args: argparse.Namespace, device, fold):
     yolo_weights, unet_weights = _default_weights(paths, args, fold)
     yolo_model = YOLO(yolo_weights)
-    unet_model = EdgeAttUNet(use_edge_attention=UNetConfig().use_edge_attention).to(device)
+    norm_layer = "instance" if args.instance_norm else "batch"
+    unet_model = EdgeAttUNet(use_edge_attention=UNetConfig().use_edge_attention, norm_layer=norm_layer).to(device)
     unet_model.load_state_dict(torch.load(unet_weights, map_location=device))
     unet_model.eval()
     return yolo_model, unet_model
@@ -124,7 +135,7 @@ def _run_all_folds(paths: Paths, args: argparse.Namespace, dataset, device, crop
         _, val_ids = load_split(paths.split_path_for(fold))
         gt_df, pred_df = build_val_gt_pred_dataframes(
             dataset, paths.train_img_dir, sorted(val_ids), yolo_model, unet_model, device, crop_cfg, inference_cfg,
-            obb=args.obb)
+            obb=args.obb, preprocess=args.normalize)
         print(f"[fold {fold}] GT filaments: {len(gt_df)}   predicted filaments: {len(pred_df)}")
         all_gt.append(gt_df)
         all_pred.append(pred_df)
@@ -236,6 +247,9 @@ def _run_ensemble(paths: Paths, args: argparse.Namespace, dataset: Dataset, devi
 
 
 def run(args: argparse.Namespace) -> None:
+    if args.normalize and args.obb:
+        raise ValueError("--normalize and --obb can't be combined this round")
+
     paths = Paths()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dataset = Dataset(paths.train_ann_path)
@@ -264,7 +278,7 @@ def run(args: argparse.Namespace) -> None:
     def run_self_eval(image_ids, label):
         gt_df, pred_df = build_val_gt_pred_dataframes(
             dataset, paths.train_img_dir, image_ids, yolo_model, unet_model, device, crop_cfg, inference_cfg,
-            obb=args.obb)
+            obb=args.obb, preprocess=args.normalize)
         print(f"[{label}] GT filaments: {len(gt_df)}   predicted filaments: {len(pred_df)}")
         overlap_df = get_overlap_df(gt_df, pred_df)
         pq_score = get_pq_score(overlap_df)

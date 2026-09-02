@@ -110,7 +110,7 @@ class FilamentCropDataset(TorchDataset):
     def __init__(self, dataset: Dataset, train_img_dir, image_ids, crop_size: int,
                  pad_factor: float, min_crop_side: int, augment: bool = False,
                  use_spine_orientation: bool = False, use_obb_orientation: bool = False,
-                 synthetic_img_dir=None):
+                 synthetic_img_dir=None, preprocess: bool = False):
         self.dataset = dataset
         self.train_img_dir = train_img_dir
         self.synthetic_img_dir = synthetic_img_dir
@@ -120,6 +120,7 @@ class FilamentCropDataset(TorchDataset):
         self.augment = augment
         self.use_spine_orientation = use_spine_orientation
         self.use_obb_orientation = use_obb_orientation
+        self.preprocess = preprocess
         self.samples = [
             (img_id, ann)
             for img_id in image_ids
@@ -133,7 +134,7 @@ class FilamentCropDataset(TorchDataset):
     def _get_image(self, img_id):
         if img_id not in self._img_cache:
             path = self.dataset.resolve_image_path(img_id, self.train_img_dir, self.synthetic_img_dir)
-            self._img_cache[img_id] = load_image(path)
+            self._img_cache[img_id] = load_image(path, preprocess=self.preprocess)
         return self._img_cache[img_id]
 
     def __getitem__(self, idx):
@@ -168,10 +169,15 @@ class FilamentCropDataset(TorchDataset):
                 if k:
                     crop = np.rot90(crop, k).copy()
                     mask = np.rot90(mask, k).copy()
-            if random.random() < 0.3:
-                gain = random.uniform(0.85, 1.15)
-                bias = random.uniform(-10, 10)
-                crop = np.clip(crop.astype(np.float32) * gain + bias, 0, 255).astype(np.uint8)
+            if random.random() < 0.9:
+                # gamma correction, not a plain linear gain/bias jitter - trains
+                # invariance to the kind of nonlinear intensity variation (limb
+                # darkening, exposure/seeing differences) real across this dataset;
+                # range and probability match the augmentation recipe in "A Modern
+                # ConvNet for Solar Filament Detection" (arXiv:2607.24525, Table 1).
+                gamma = random.uniform(0.5, 1.5)
+                normalized = crop.astype(np.float32) / 255.0
+                crop = np.clip((normalized ** gamma) * 255.0, 0, 255).astype(np.uint8)
 
         crop_t = torch.from_numpy(crop).float().unsqueeze(0) / 255.0
         mask_t = torch.from_numpy(mask).float().unsqueeze(0)

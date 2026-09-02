@@ -23,6 +23,10 @@ def add_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--obb", action="store_true",
                          help="also build an oriented-bounding-box YOLO dataset (yolo_obb_dataset/) "
                               "alongside the axis-aligned one")
+    parser.add_argument("--normalize", action="store_true",
+                         help="also build a limb-darkening-flattened + CLAHE-preprocessed axis-aligned YOLO "
+                              "dataset (yolo_norm_dataset/), for `train-yolo --normalize`. Not combinable with "
+                              "--obb this round")
 
 
 def _prepare_one(dataset, paths, train_ids, val_ids, fold, args):
@@ -50,6 +54,12 @@ def _prepare_one(dataset, paths, train_ids, val_ids, fold, args):
         obb_yaml_path = build_yolo_obb_dataset(dataset, paths.train_img_dir, paths.yolo_obb_dir_for(fold),
                                                 train_ids, val_ids, synthetic_img_dir=paths.synthetic_img_dir_for(fold))
         print(f"  OBB dataset -> {obb_yaml_path}")
+
+    if args.normalize:
+        norm_yaml_path = build_yolo_dataset(dataset, paths.train_img_dir, paths.yolo_norm_dir_for(fold),
+                                             train_ids, val_ids, synthetic_img_dir=paths.synthetic_img_dir_for(fold),
+                                             preprocess=True)
+        print(f"  normalized dataset -> {norm_yaml_path}")
 
 
 def run(args: argparse.Namespace) -> None:

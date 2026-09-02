@@ -72,10 +72,13 @@ def polygon_to_mask(segmentation: List[float], height: int, width: int) -> np.nd
     return mask
 
 
-def load_image(path: Path) -> np.ndarray:
+def load_image(path: Path, preprocess: bool = False) -> np.ndarray:
     img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
     if img is None:
         raise FileNotFoundError(path)
+    if preprocess:
+        from solar_filaments.data.preprocess import preprocess_image
+        img = preprocess_image(img)
     return img
 
 

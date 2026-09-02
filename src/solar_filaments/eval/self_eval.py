@@ -218,7 +218,8 @@ def _gt_rows_for_image(dataset: Dataset, img_id) -> list:
 
 def build_val_gt_pred_dataframes(dataset: Dataset, train_img_dir: Path, image_ids,
                                   yolo_model, unet_model, device: torch.device,
-                                  crop_cfg, inference_cfg, obb: bool = False):
+                                  crop_cfg, inference_cfg, obb: bool = False,
+                                  preprocess: bool = False):
     """Ground-truth and prediction dataframes in the exact submission schema
     (filament_id, segmentation_rle), so they can be fed straight into the
     organizers' own scoring functions above."""
@@ -251,6 +252,7 @@ def build_val_gt_pred_dataframes(dataset: Dataset, train_img_dir: Path, image_id
                 mask_thresh=inference_cfg.mask_thresh, min_instance_area=inference_cfg.min_instance_area,
                 mask_nms_thresh=inference_cfg.mask_nms_thresh, mask_conf_thres=inference_cfg.mask_conf_thres,
                 use_spine_orientation=crop_cfg.use_spine_orientation, min_elongation=inference_cfg.min_elongation,
+                preprocess=preprocess,
             )
         stem_rows = []
         for inst_id in range(1, int(label_map.max()) + 1):

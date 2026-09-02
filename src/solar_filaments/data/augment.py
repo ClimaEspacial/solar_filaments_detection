@@ -18,6 +18,7 @@ import numpy as np
 
 from solar_filaments.data.coco import Dataset, load_image
 from solar_filaments.data.crop_dataset import padded_rect_crop
+from solar_filaments.data.preprocess import estimate_disk_mask
 
 
 @dataclass
@@ -28,17 +29,6 @@ class FilamentPatch:
     spine_local: Optional[np.ndarray]  # Mx2 or None
     bbox_local: Tuple[float, float, float, float]  # x, y, w, h in img's local coords
     category_id: int
-
-
-def estimate_disk_mask(img: np.ndarray) -> np.ndarray:
-    """Boolean mask of the on-disk region (bright) vs. off-disk background
-    (near-black), via Otsu thresholding + largest connected component."""
-    _, thresh = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats((thresh > 0).astype(np.uint8), connectivity=8)
-    if n_labels <= 1:
-        return thresh > 0
-    largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-    return labels == largest
 
 
 def build_filament_bank(dataset: Dataset, train_img_dir: Path, train_ids: Set,

@@ -28,7 +28,7 @@ from scipy.ndimage import median_filter
 from skimage.measure import label, regionprops
 from skimage.morphology import closing
 
-from solar_filaments.data.augment import estimate_disk_mask
+from solar_filaments.data.preprocess import estimate_disk_mask
 
 
 def local_median_mask(img: np.ndarray, size: int = 20, cutoff_m: float = 0.96) -> np.ndarray:

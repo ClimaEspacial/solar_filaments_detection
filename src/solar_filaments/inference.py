@@ -82,9 +82,10 @@ def predict_instances(image_path: Path, yolo_model, unet_model, device: torch.de
                        crop_size: int = 256, pad_factor: float = 1.35, min_crop_side: int = 48,
                        mask_thresh: float = 0.5, min_instance_area: int = 25,
                        mask_nms_thresh: float = 0.4, mask_conf_thres: float = 0.0,
-                       use_spine_orientation: bool = False, min_elongation: float = 1.5
+                       use_spine_orientation: bool = False, min_elongation: float = 1.5,
+                       preprocess: bool = False
                        ) -> Tuple[np.ndarray, List[float]]:
-    img = load_image(image_path)
+    img = load_image(image_path, preprocess=preprocess)
     H, W = img.shape
 
     det = yolo_model.predict(img, conf=conf_thres, iou=iou_thres, imgsz=imgsz, verbose=False)[0]

@@ -5,18 +5,33 @@ bottleneck whose Query/Key are biased by a learned edge map of the *input*
 crop (idea from EdgeAttNet, arXiv:2509.02964) - meant to help recover thin
 barbs. Channel widths are kept small (32-256) since pipeline efficiency is
 also scored.
+
+`norm_layer="instance"` swaps BatchNorm for InstanceNorm, per "A Modern
+ConvNet for Solar Filament Detection" (arXiv:2607.24525): "IN focuses more on
+local contrast variations, while BN retains global intensity statistics...
+particularly suitable for solar filament segmentation because local
+intensity variations are critical, and even decisive, indicators on Halpha
+images." Default stays "batch" (original behavior, existing checkpoints).
 """
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _make_norm(norm_layer: str, c_out: int) -> nn.Module:
+    if norm_layer == "instance":
+        return nn.InstanceNorm2d(c_out, affine=True)
+    if norm_layer == "batch":
+        return nn.BatchNorm2d(c_out)
+    raise ValueError(f"unknown norm_layer: {norm_layer!r} (expected 'batch' or 'instance')")
+
+
 class ConvBlock(nn.Module):
-    def __init__(self, c_in, c_out):
+    def __init__(self, c_in, c_out, norm_layer: str = "batch"):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(c_in, c_out, 3, padding=1, bias=False), nn.BatchNorm2d(c_out), nn.ReLU(inplace=True),
-            nn.Conv2d(c_out, c_out, 3, padding=1, bias=False), nn.BatchNorm2d(c_out), nn.ReLU(inplace=True),
+            nn.Conv2d(c_in, c_out, 3, padding=1, bias=False), _make_norm(norm_layer, c_out), nn.ReLU(inplace=True),
+            nn.Conv2d(c_out, c_out, 3, padding=1, bias=False), _make_norm(norm_layer, c_out), nn.ReLU(inplace=True),
         )
 
     def forward(self, x):
@@ -48,27 +63,27 @@ class EdgeGuidedAttention(nn.Module):
 
 
 class EdgeAttUNet(nn.Module):
-    def __init__(self, in_ch=1, out_ch=1, base=32, use_edge_attention=True):
+    def __init__(self, in_ch=1, out_ch=1, base=32, use_edge_attention=True, norm_layer: str = "batch"):
         super().__init__()
         self.use_edge_attention = use_edge_attention
-        self.enc1 = ConvBlock(in_ch, base)
-        self.enc2 = ConvBlock(base, base * 2)
-        self.enc3 = ConvBlock(base * 2, base * 4)
-        self.enc4 = ConvBlock(base * 4, base * 8)
+        self.enc1 = ConvBlock(in_ch, base, norm_layer)
+        self.enc2 = ConvBlock(base, base * 2, norm_layer)
+        self.enc3 = ConvBlock(base * 2, base * 4, norm_layer)
+        self.enc4 = ConvBlock(base * 4, base * 8, norm_layer)
         self.pool = nn.MaxPool2d(2)
 
-        self.bottleneck = ConvBlock(base * 8, base * 16)
+        self.bottleneck = ConvBlock(base * 8, base * 16, norm_layer)
         if use_edge_attention:
             self.edge_attn = EdgeGuidedAttention(base * 16)
 
         self.up4 = nn.ConvTranspose2d(base * 16, base * 8, 2, stride=2)
-        self.dec4 = ConvBlock(base * 16, base * 8)
+        self.dec4 = ConvBlock(base * 16, base * 8, norm_layer)
         self.up3 = nn.ConvTranspose2d(base * 8, base * 4, 2, stride=2)
-        self.dec3 = ConvBlock(base * 8, base * 4)
+        self.dec3 = ConvBlock(base * 8, base * 4, norm_layer)
         self.up2 = nn.ConvTranspose2d(base * 4, base * 2, 2, stride=2)
-        self.dec2 = ConvBlock(base * 4, base * 2)
+        self.dec2 = ConvBlock(base * 4, base * 2, norm_layer)
         self.up1 = nn.ConvTranspose2d(base * 2, base, 2, stride=2)
-        self.dec1 = ConvBlock(base * 2, base)
+        self.dec1 = ConvBlock(base * 2, base, norm_layer)
 
         self.head = nn.Conv2d(base, out_ch, 1)
 

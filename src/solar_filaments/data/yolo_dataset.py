@@ -6,7 +6,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from solar_filaments.data.coco import Dataset
+from solar_filaments.data.coco import Dataset, load_image
 
 
 def _symlink_split_images(dataset: Dataset, ids: set, split_img_dir: Path,
@@ -20,12 +20,31 @@ def _symlink_split_images(dataset: Dataset, ids: set, split_img_dir: Path,
             os.symlink(src, dst_img)
 
 
+def _materialize_preprocessed_split_images(dataset: Dataset, ids: set, split_img_dir: Path,
+                                            train_img_dir: Path, synthetic_img_dir: Optional[Path]) -> None:
+    """Like _symlink_split_images, but writes an actual preprocessed copy of
+    each image - YOLO reads image files directly off disk (not through
+    load_image), so a symlink to the raw file can't carry the preprocessing."""
+    split_img_dir.mkdir(parents=True, exist_ok=True)
+    for img_id in ids:
+        info = dataset.images_by_id[img_id]
+        src = dataset.resolve_image_path(img_id, train_img_dir, synthetic_img_dir)
+        dst_img = split_img_dir / info["file_name"]
+        if not dst_img.exists():
+            img = load_image(src, preprocess=True)
+            cv2.imwrite(str(dst_img), img)
+
+
 def build_yolo_dataset(dataset: Dataset, train_img_dir: Path, yolo_dir: Path,
-                        train_ids: set, val_ids: set, synthetic_img_dir: Optional[Path] = None) -> Path:
-    """Symlinks images and writes axis-aligned YOLO-format label .txt files
-    for train/val, plus a data.yaml. Returns the path to data.yaml."""
+                        train_ids: set, val_ids: set, synthetic_img_dir: Optional[Path] = None,
+                        preprocess: bool = False) -> Path:
+    """Symlinks images (or, when `preprocess`, writes materialized
+    limb-darkening-flattened + CLAHE copies - see data/preprocess.py) and
+    writes axis-aligned YOLO-format label .txt files for train/val, plus a
+    data.yaml. Returns the path to data.yaml."""
+    place_images = _materialize_preprocessed_split_images if preprocess else _symlink_split_images
     for split, ids in [("train", train_ids), ("val", val_ids)]:
-        _symlink_split_images(dataset, ids, yolo_dir / "images" / split, train_img_dir, synthetic_img_dir)
+        place_images(dataset, ids, yolo_dir / "images" / split, train_img_dir, synthetic_img_dir)
         (yolo_dir / "labels" / split).mkdir(parents=True, exist_ok=True)
         for img_id in ids:
             info = dataset.images_by_id[img_id]
