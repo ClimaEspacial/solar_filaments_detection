@@ -10,7 +10,7 @@ import collections
 import json
 import random
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -41,6 +41,15 @@ class Dataset:
         self.file_name_to_image_ids: Dict[str, List] = collections.defaultdict(list)
         for img_id, info in self.images_by_id.items():
             self.file_name_to_image_ids[info["file_name"]].append(img_id)
+
+    def resolve_image_path(self, img_id, train_img_dir: Path,
+                            synthetic_img_dir: Optional[Path] = None) -> Path:
+        """Real images live under train_img_dir; copy-paste-augmented images
+        (see data/augment.py) are flagged `synthetic=True` and live under
+        synthetic_img_dir instead."""
+        info = self.images_by_id[img_id]
+        base = synthetic_img_dir if info.get("synthetic") and synthetic_img_dir is not None else train_img_dir
+        return base / info["file_name"]
 
     def summary(self) -> str:
         n_imgs = len(self.images_by_id)
@@ -76,16 +85,39 @@ def train_val_split(dataset: "Dataset", seed: int, val_frac: float = 0.1) -> Tup
     train while the same photo under a different annotator's image_id ends up
     in val - MAGFiLO images can carry up to 3 independent annotator records
     sharing one file_name, and splitting on image_id alone would leak that
-    photo's pixels into both splits."""
+    photo's pixels into both splits.
+
+    `val_frac <= 0` yields an empty val set (everything in train) - useful
+    for a final model trained on all data once cross-validation has picked a
+    config."""
     file_names = list(dataset.file_name_to_image_ids.keys())
     random.Random(seed).shuffle(file_names)
-    n_val_files = max(1, int(val_frac * len(file_names)))
+    n_val_files = 0 if val_frac <= 0 else max(1, int(val_frac * len(file_names)))
     val_files = set(file_names[:n_val_files])
     train_files = set(file_names[n_val_files:])
 
     train_ids = {img_id for fn in train_files for img_id in dataset.file_name_to_image_ids[fn]}
     val_ids = {img_id for fn in val_files for img_id in dataset.file_name_to_image_ids[fn]}
     return train_ids, val_ids
+
+
+def kfold_split(dataset: "Dataset", seed: int, k: int) -> List[Tuple[set, set]]:
+    """K-fold split at the physical-image level (same leak-safe grouping as
+    train_val_split). Returns a list of (train_ids, val_ids) pairs, one per
+    fold; the val sets partition every unique image exactly once."""
+    file_names = list(dataset.file_name_to_image_ids.keys())
+    random.Random(seed).shuffle(file_names)
+
+    folds: List[List[str]] = [file_names[i::k] for i in range(k)]
+
+    splits = []
+    for i in range(k):
+        val_files = set(folds[i])
+        train_files = set(file_names) - val_files
+        train_ids = {img_id for fn in train_files for img_id in dataset.file_name_to_image_ids[fn]}
+        val_ids = {img_id for fn in val_files for img_id in dataset.file_name_to_image_ids[fn]}
+        splits.append((train_ids, val_ids))
+    return splits
 
 
 def save_split(split_path: Path, train_ids: set, val_ids: set) -> None:

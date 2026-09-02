@@ -6,6 +6,7 @@ unmodified on Kaggle (`/kaggle/...`) or locally (defaults below).
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 
 def _env_path(name: str, default: str) -> Path:
@@ -40,6 +41,10 @@ class Paths:
         return self.work_dir / "yolo_dataset"
 
     @property
+    def yolo_obb_dir(self) -> Path:
+        return self.work_dir / "yolo_obb_dataset"
+
+    @property
     def ckpt_dir(self) -> Path:
         return self.work_dir / "checkpoints"
 
@@ -50,6 +55,30 @@ class Paths:
     @property
     def split_path(self) -> Path:
         return self.work_dir / "split.json"
+
+    @property
+    def splits_dir(self) -> Path:
+        return self.work_dir / "splits"
+
+    @property
+    def kfold_meta_path(self) -> Path:
+        return self.splits_dir / "meta.json"
+
+    @property
+    def synthetic_img_dir(self) -> Path:
+        return self.work_dir / "synthetic_images"
+
+    def split_path_for(self, fold: Optional[int]) -> Path:
+        return self.split_path if fold is None else self.splits_dir / f"fold{fold}.json"
+
+    def yolo_dir_for(self, fold: Optional[int]) -> Path:
+        return self.yolo_dir if fold is None else self.yolo_dir / f"fold{fold}"
+
+    def yolo_obb_dir_for(self, fold: Optional[int]) -> Path:
+        return self.yolo_obb_dir if fold is None else self.yolo_obb_dir / f"fold{fold}"
+
+    def synthetic_img_dir_for(self, fold: Optional[int]) -> Path:
+        return self.synthetic_img_dir if fold is None else self.synthetic_img_dir / f"fold{fold}"
 
     def ensure(self) -> None:
         self.work_dir.mkdir(parents=True, exist_ok=True)
@@ -64,7 +93,12 @@ class CropConfig:
     # rotate the crop so the filament's spine lies horizontal before letterboxing,
     # instead of a plain axis-aligned bbox crop. A U-Net trained with this on must
     # also be run with this on at inference (see inference.py) - they're paired.
+    # Closed avenue (didn't beat baseline) - kept for reference, off by default.
     use_spine_orientation: bool = False
+    # rotate the crop to match the minAreaRect of the GT polygon (same geometry
+    # the OBB detector is trained to predict), instead of the spine's PCA axis.
+    # Pairs with an OBB-trained YOLO + `predict_instances_obb` at inference.
+    use_obb_orientation: bool = False
 
 
 @dataclass
@@ -105,6 +139,11 @@ class InferenceConfig:
     # conf_thres than 0.35, to recover recall without the precision hit that
     # lowering conf_thres alone caused (see notebook history for that sweep).
     mask_conf_thres: float = 0.0
+    # min elongation (principal/secondary PCA spread ratio) of a rough mask
+    # before trusting its estimated orientation in spine-oriented inference;
+    # below this the candidate falls back to the axis-aligned mask. Only used
+    # when CropConfig.use_spine_orientation is on.
+    min_elongation: float = 1.5
 
 
 SEED = 42

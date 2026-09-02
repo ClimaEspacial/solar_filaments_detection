@@ -27,8 +27,9 @@ from pycocotools import mask as mask_util
 
 import matplotlib.pyplot as plt
 
-from solar_filaments.data.coco import Dataset, polygon_to_mask
-from solar_filaments.inference import predict_instances
+from solar_filaments.classical import detect_filaments_classical
+from solar_filaments.data.coco import Dataset, load_image, polygon_to_mask
+from solar_filaments.inference import predict_instances, predict_instances_ensemble, predict_instances_obb
 from solar_filaments.rle import encode_rle_counts
 
 
@@ -201,9 +202,23 @@ def plot_m2n_counts(overlap_df: pd.DataFrame, title: str = "Many to One and One 
     ], fontsize=9)
 
 
+def _gt_rows_for_image(dataset: Dataset, img_id) -> list:
+    """GT rows for one image record, keyed "{img_id}_{n}" - img_id is already
+    "{annotator_code}-{image_stem}" in this dataset release (see
+    Dataset.__init__), i.e. exactly the "{annotator}-{image_id}" prefix the
+    organizers' self-eval expects for GT filament_id."""
+    info = dataset.images_by_id[img_id]
+    H, W = info["height"], info["width"]
+    rows = []
+    for n, ann in enumerate(dataset.anns_by_image[img_id], start=1):
+        mask = polygon_to_mask(ann["segmentation"], H, W)
+        rows.append({"filament_id": f"{img_id}_{n}", "segmentation_rle": encode_rle_counts(mask)})
+    return rows
+
+
 def build_val_gt_pred_dataframes(dataset: Dataset, train_img_dir: Path, image_ids,
                                   yolo_model, unet_model, device: torch.device,
-                                  crop_cfg, inference_cfg):
+                                  crop_cfg, inference_cfg, obb: bool = False):
     """Ground-truth and prediction dataframes in the exact submission schema
     (filament_id, segmentation_rle), so they can be fed straight into the
     organizers' own scoring functions above."""
@@ -212,29 +227,95 @@ def build_val_gt_pred_dataframes(dataset: Dataset, train_img_dir: Path, image_id
                              # share one physical file, so predict once per file.
     for img_id in image_ids:
         info = dataset.images_by_id[img_id]
-        H, W = info["height"], info["width"]
         image_stem = Path(info["file_name"]).stem
-
-        # img_id is already "{annotator_code}-{image_stem}" in this dataset
-        # release (see Dataset.__init__), i.e. exactly the "{annotator}-{image_id}"
-        # prefix the organizers' self-eval expects for GT filament_id.
-        for n, ann in enumerate(dataset.anns_by_image[img_id], start=1):
-            mask = polygon_to_mask(ann["segmentation"], H, W)
-            gt_rows.append({"filament_id": f"{img_id}_{n}",
-                             "segmentation_rle": encode_rle_counts(mask)})
+        gt_rows.extend(_gt_rows_for_image(dataset, img_id))
 
         if image_stem in pred_rows_by_stem:
             continue  # already predicted for this physical image via another annotator's img_id
 
-        label_map, _ = predict_instances(
-            train_img_dir / info["file_name"], yolo_model, unet_model, device,
-            conf_thres=inference_cfg.conf_thres, iou_thres=inference_cfg.iou_thres,
-            imgsz=inference_cfg.imgsz, crop_size=crop_cfg.crop_size,
-            pad_factor=crop_cfg.pad_factor, min_crop_side=crop_cfg.min_crop_side,
-            mask_thresh=inference_cfg.mask_thresh, min_instance_area=inference_cfg.min_instance_area,
-            mask_nms_thresh=inference_cfg.mask_nms_thresh, mask_conf_thres=inference_cfg.mask_conf_thres,
-            use_spine_orientation=crop_cfg.use_spine_orientation,
-        )
+        if obb:
+            label_map, _ = predict_instances_obb(
+                train_img_dir / info["file_name"], yolo_model, unet_model, device,
+                conf_thres=inference_cfg.conf_thres, iou_thres=inference_cfg.iou_thres,
+                imgsz=inference_cfg.imgsz, crop_size=crop_cfg.crop_size,
+                pad_factor=crop_cfg.pad_factor, min_crop_side=crop_cfg.min_crop_side,
+                mask_thresh=inference_cfg.mask_thresh, min_instance_area=inference_cfg.min_instance_area,
+                mask_nms_thresh=inference_cfg.mask_nms_thresh, mask_conf_thres=inference_cfg.mask_conf_thres,
+            )
+        else:
+            label_map, _ = predict_instances(
+                train_img_dir / info["file_name"], yolo_model, unet_model, device,
+                conf_thres=inference_cfg.conf_thres, iou_thres=inference_cfg.iou_thres,
+                imgsz=inference_cfg.imgsz, crop_size=crop_cfg.crop_size,
+                pad_factor=crop_cfg.pad_factor, min_crop_side=crop_cfg.min_crop_side,
+                mask_thresh=inference_cfg.mask_thresh, min_instance_area=inference_cfg.min_instance_area,
+                mask_nms_thresh=inference_cfg.mask_nms_thresh, mask_conf_thres=inference_cfg.mask_conf_thres,
+                use_spine_orientation=crop_cfg.use_spine_orientation, min_elongation=inference_cfg.min_elongation,
+            )
+        stem_rows = []
+        for inst_id in range(1, int(label_map.max()) + 1):
+            mask = label_map == inst_id
+            if not mask.any():
+                continue
+            stem_rows.append({"filament_id": f"{image_stem}_{inst_id}",
+                               "segmentation_rle": encode_rle_counts(mask)})
+        pred_rows_by_stem[image_stem] = stem_rows
+
+    pred_rows = [row for rows in pred_rows_by_stem.values() for row in rows]
+    cols = ["filament_id", "segmentation_rle"]
+    return pd.DataFrame(gt_rows, columns=cols), pd.DataFrame(pred_rows, columns=cols)
+
+
+def build_val_gt_pred_dataframes_classical(dataset: Dataset, train_img_dir: Path, image_ids,
+                                            classical_kwargs: dict):
+    """Same as build_val_gt_pred_dataframes, but for the classical (no
+    YOLO/U-Net, no GPU) detector - see classical.py."""
+    gt_rows = []
+    pred_rows_by_stem = {}
+    for img_id in image_ids:
+        info = dataset.images_by_id[img_id]
+        image_stem = Path(info["file_name"]).stem
+        gt_rows.extend(_gt_rows_for_image(dataset, img_id))
+
+        if image_stem in pred_rows_by_stem:
+            continue
+
+        img = load_image(train_img_dir / info["file_name"])
+        label_map, _ = detect_filaments_classical(img, **classical_kwargs)
+        stem_rows = []
+        for inst_id in range(1, int(label_map.max()) + 1):
+            mask = label_map == inst_id
+            if not mask.any():
+                continue
+            stem_rows.append({"filament_id": f"{image_stem}_{inst_id}",
+                               "segmentation_rle": encode_rle_counts(mask)})
+        pred_rows_by_stem[image_stem] = stem_rows
+
+    pred_rows = [row for rows in pred_rows_by_stem.values() for row in rows]
+    cols = ["filament_id", "segmentation_rle"]
+    return pd.DataFrame(gt_rows, columns=cols), pd.DataFrame(pred_rows, columns=cols)
+
+
+def build_val_gt_pred_dataframes_ensemble(dataset: Dataset, train_img_dir: Path, image_ids,
+                                           make_sources, ensemble_kwargs: dict):
+    """Same as build_val_gt_pred_dataframes, but for predict_instances_ensemble.
+    `make_sources(image_path) -> sources` builds the per-image (predict_call,
+    weight) list the caller wants ensembled (e.g. axis-aligned + OBB + the
+    classical detector) - kept as a callback so this module doesn't need to
+    know which models/detectors are being combined."""
+    gt_rows = []
+    pred_rows_by_stem = {}
+    for img_id in image_ids:
+        info = dataset.images_by_id[img_id]
+        image_stem = Path(info["file_name"]).stem
+        gt_rows.extend(_gt_rows_for_image(dataset, img_id))
+
+        if image_stem in pred_rows_by_stem:
+            continue
+
+        image_path = train_img_dir / info["file_name"]
+        sources = make_sources(image_path)
+        label_map, _ = predict_instances_ensemble(sources, **ensemble_kwargs)
         stem_rows = []
         for inst_id in range(1, int(label_map.max()) + 1):
             mask = label_map == inst_id

@@ -5,7 +5,7 @@ import torch
 from ultralytics import YOLO
 
 from solar_filaments.config import CropConfig, InferenceConfig, Paths, UNetConfig, YoloConfig
-from solar_filaments.inference import predict_instances
+from solar_filaments.inference import predict_instances, predict_instances_obb
 from solar_filaments.models.unet import EdgeAttUNet
 from solar_filaments.rle import encode_rle_counts
 
@@ -24,14 +24,26 @@ def add_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--spine-orientation", action="store_true",
                          help="use a spine-oriented crop/U-Net pair instead of axis-aligned "
                               "(default unet-weights becomes unet_spine_best.pt)")
+    parser.add_argument("--min-elongation", type=float, default=InferenceConfig().min_elongation,
+                         help="spine-orientation only: min PCA elongation of a rough mask to trust its angle")
+    parser.add_argument("--obb", action="store_true",
+                         help="use an OBB-trained detector + matching U-Net (single-pass rotated crop, "
+                              "no bootstrap) instead of axis-aligned - default weights become "
+                              "<yolo-name>_obb / unet_obb_best.pt")
+    parser.add_argument("--fold", type=int, default=None,
+                         help="use this fold's weights (from `filament prepare --k-folds`); "
+                              "default: no fold suffix (the single-split model)")
 
 
 def run(args: argparse.Namespace) -> None:
     paths = Paths()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    default_unet_name = "unet_spine_best.pt" if args.spine_orientation else "unet_best.pt"
-    yolo_weights = args.yolo_weights or str(paths.runs_dir / YoloConfig().name / "weights" / "best.pt")
+    base_name = f"{YoloConfig().name}_obb" if args.obb else YoloConfig().name
+    yolo_name = f"{base_name}_fold{args.fold}" if args.fold is not None else base_name
+    unet_stem = "unet_obb" if args.obb else ("unet_spine" if args.spine_orientation else "unet")
+    default_unet_name = f"{unet_stem}_fold{args.fold}_best.pt" if args.fold is not None else f"{unet_stem}_best.pt"
+    yolo_weights = args.yolo_weights or str(paths.runs_dir / yolo_name / "weights" / "best.pt")
     unet_weights = args.unet_weights or str(paths.ckpt_dir / default_unet_name)
     out_path = args.out or str(paths.work_dir / "submission.csv")
 
@@ -40,24 +52,35 @@ def run(args: argparse.Namespace) -> None:
     unet_model.load_state_dict(torch.load(unet_weights, map_location=device))
     unet_model.eval()
 
-    crop_cfg = CropConfig(use_spine_orientation=args.spine_orientation)
+    crop_cfg = CropConfig(use_spine_orientation=args.spine_orientation, use_obb_orientation=args.obb)
     inference_cfg = InferenceConfig(conf_thres=args.conf_thres, iou_thres=args.iou_thres, imgsz=args.imgsz,
-                                     mask_nms_thresh=args.mask_nms_thresh, mask_conf_thres=args.mask_conf_thres)
+                                     mask_nms_thresh=args.mask_nms_thresh, mask_conf_thres=args.mask_conf_thres,
+                                     min_elongation=args.min_elongation)
 
     test_image_paths = sorted(paths.test_img_dir.glob("*.jpeg"))
     submission_rows = []
 
     for path in test_image_paths:
         image_id = path.stem
-        label_map, _ = predict_instances(
-            path, yolo_model, unet_model, device,
-            conf_thres=inference_cfg.conf_thres, iou_thres=inference_cfg.iou_thres,
-            imgsz=inference_cfg.imgsz, crop_size=crop_cfg.crop_size,
-            pad_factor=crop_cfg.pad_factor, min_crop_side=crop_cfg.min_crop_side,
-            mask_thresh=inference_cfg.mask_thresh, min_instance_area=inference_cfg.min_instance_area,
-            mask_nms_thresh=inference_cfg.mask_nms_thresh, mask_conf_thres=inference_cfg.mask_conf_thres,
-            use_spine_orientation=crop_cfg.use_spine_orientation,
-        )
+        if args.obb:
+            label_map, _ = predict_instances_obb(
+                path, yolo_model, unet_model, device,
+                conf_thres=inference_cfg.conf_thres, iou_thres=inference_cfg.iou_thres,
+                imgsz=inference_cfg.imgsz, crop_size=crop_cfg.crop_size,
+                pad_factor=crop_cfg.pad_factor, min_crop_side=crop_cfg.min_crop_side,
+                mask_thresh=inference_cfg.mask_thresh, min_instance_area=inference_cfg.min_instance_area,
+                mask_nms_thresh=inference_cfg.mask_nms_thresh, mask_conf_thres=inference_cfg.mask_conf_thres,
+            )
+        else:
+            label_map, _ = predict_instances(
+                path, yolo_model, unet_model, device,
+                conf_thres=inference_cfg.conf_thres, iou_thres=inference_cfg.iou_thres,
+                imgsz=inference_cfg.imgsz, crop_size=crop_cfg.crop_size,
+                pad_factor=crop_cfg.pad_factor, min_crop_side=crop_cfg.min_crop_side,
+                mask_thresh=inference_cfg.mask_thresh, min_instance_area=inference_cfg.min_instance_area,
+                mask_nms_thresh=inference_cfg.mask_nms_thresh, mask_conf_thres=inference_cfg.mask_conf_thres,
+                use_spine_orientation=crop_cfg.use_spine_orientation, min_elongation=inference_cfg.min_elongation,
+            )
         for inst_id in range(1, int(label_map.max()) + 1):
             mask = label_map == inst_id
             if not mask.any():

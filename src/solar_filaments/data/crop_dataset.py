@@ -18,7 +18,8 @@ from torch.utils.data import Dataset as TorchDataset
 
 from solar_filaments.data.coco import Dataset, load_image, polygon_to_mask
 from solar_filaments.data.oriented_crop import (apply_affine_points, crop_patch_with_padding,
-                                                 patch_half_size, pca_angle_deg, rotation_matrix)
+                                                 minarearect_angle_deg, patch_half_size, pca_angle_deg,
+                                                 rotation_matrix)
 
 
 def padded_rect_crop(x: float, y: float, w: float, h: float, W: int, H: int,
@@ -53,17 +54,12 @@ def undo_letterbox(canvas: np.ndarray, scale: float, left: int, top: int,
     return cv2.resize(cropped, (orig_w, orig_h), interpolation=interp)
 
 
-def spine_oriented_sample(img: np.ndarray, segmentation, spine, crop_size: int,
-                           pad_factor: float, min_crop_side: int):
-    """Crop+letterbox a filament rotated so its GT spine lies horizontal,
-    instead of a plain axis-aligned bbox crop. Uses the spine polyline's
-    principal axis for the angle and the segmentation polygon (rotated along
-    with the image) for the exact tight bbox and mask - see oriented_crop.py."""
-    poly = np.asarray(segmentation, dtype=np.float32).reshape(-1, 2)
-    spine_pts = np.asarray(spine, dtype=np.float32).reshape(-1, 2)
+def _oriented_sample(img: np.ndarray, poly: np.ndarray, angle: float, crop_size: int,
+                      pad_factor: float, min_crop_side: int):
+    """Shared geometry for spine_oriented_sample/obb_oriented_sample: rotate a
+    local patch around `poly`'s centroid by `angle` (degrees), then crop+mask+
+    letterbox the rotated filament - see oriented_crop.py for the primitives."""
     centroid = poly.mean(axis=0)
-    angle = pca_angle_deg(spine_pts)
-
     diag = float(np.linalg.norm(poly.max(axis=0) - poly.min(axis=0)))
     half = patch_half_size(diag)
     patch, off_x, off_y = crop_patch_with_padding(img, centroid[0], centroid[1], half)
@@ -88,17 +84,42 @@ def spine_oriented_sample(img: np.ndarray, segmentation, spine, crop_size: int,
     return crop, mask
 
 
+def spine_oriented_sample(img: np.ndarray, segmentation, spine, crop_size: int,
+                           pad_factor: float, min_crop_side: int):
+    """Crop+letterbox a filament rotated so its GT spine lies horizontal,
+    instead of a plain axis-aligned bbox crop. Uses the spine polyline's
+    principal axis for the angle - see oriented_crop.py."""
+    poly = np.asarray(segmentation, dtype=np.float32).reshape(-1, 2)
+    spine_pts = np.asarray(spine, dtype=np.float32).reshape(-1, 2)
+    angle = pca_angle_deg(spine_pts)
+    return _oriented_sample(img, poly, angle, crop_size, pad_factor, min_crop_side)
+
+
+def obb_oriented_sample(img: np.ndarray, segmentation, crop_size: int,
+                         pad_factor: float, min_crop_side: int):
+    """Crop+letterbox a filament rotated so the long edge of its minimum-area
+    enclosing rectangle lies horizontal - the same geometry an OBB detector
+    is trained to predict, so the U-Net sees crops matching what
+    predict_instances_obb will produce at inference (see oriented_crop.py)."""
+    poly = np.asarray(segmentation, dtype=np.float32).reshape(-1, 2)
+    angle = minarearect_angle_deg(poly)
+    return _oriented_sample(img, poly, angle, crop_size, pad_factor, min_crop_side)
+
+
 class FilamentCropDataset(TorchDataset):
     def __init__(self, dataset: Dataset, train_img_dir, image_ids, crop_size: int,
                  pad_factor: float, min_crop_side: int, augment: bool = False,
-                 use_spine_orientation: bool = False):
+                 use_spine_orientation: bool = False, use_obb_orientation: bool = False,
+                 synthetic_img_dir=None):
         self.dataset = dataset
         self.train_img_dir = train_img_dir
+        self.synthetic_img_dir = synthetic_img_dir
         self.crop_size = crop_size
         self.pad_factor = pad_factor
         self.min_crop_side = min_crop_side
         self.augment = augment
         self.use_spine_orientation = use_spine_orientation
+        self.use_obb_orientation = use_obb_orientation
         self.samples = [
             (img_id, ann)
             for img_id in image_ids
@@ -111,8 +132,8 @@ class FilamentCropDataset(TorchDataset):
 
     def _get_image(self, img_id):
         if img_id not in self._img_cache:
-            info = self.dataset.images_by_id[img_id]
-            self._img_cache[img_id] = load_image(self.train_img_dir / info["file_name"])
+            path = self.dataset.resolve_image_path(img_id, self.train_img_dir, self.synthetic_img_dir)
+            self._img_cache[img_id] = load_image(path)
         return self._img_cache[img_id]
 
     def __getitem__(self, idx):
@@ -120,7 +141,10 @@ class FilamentCropDataset(TorchDataset):
         img = self._get_image(img_id)
         H, W = img.shape
 
-        if self.use_spine_orientation:
+        if self.use_obb_orientation:
+            crop, mask = obb_oriented_sample(img, ann["segmentation"],
+                                              self.crop_size, self.pad_factor, self.min_crop_side)
+        elif self.use_spine_orientation:
             crop, mask = spine_oriented_sample(img, ann["segmentation"], ann["spine"],
                                                 self.crop_size, self.pad_factor, self.min_crop_side)
         else:
@@ -137,9 +161,9 @@ class FilamentCropDataset(TorchDataset):
                 crop, mask = crop[:, ::-1].copy(), mask[:, ::-1].copy()
             if random.random() < 0.5:
                 crop, mask = crop[::-1, :].copy(), mask[::-1, :].copy()
-            if not self.use_spine_orientation:
+            if not (self.use_spine_orientation or self.use_obb_orientation):
                 # a 90-degree rotation would undo the whole point of a canonical
-                # spine-horizontal orientation, so skip it in that mode.
+                # horizontal orientation, so skip it in either oriented mode.
                 k = random.choice([0, 1, 2, 3])
                 if k:
                     crop = np.rot90(crop, k).copy()

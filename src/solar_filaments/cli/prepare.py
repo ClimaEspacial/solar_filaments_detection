@@ -1,17 +1,55 @@
 import argparse
+import json
 import random
 
 import numpy as np
 import torch
 
 from solar_filaments.config import SEED, Paths
-from solar_filaments.data.coco import Dataset, save_split, train_val_split
-from solar_filaments.data.yolo_dataset import build_yolo_dataset
+from solar_filaments.data.augment import generate_synthetic_images
+from solar_filaments.data.coco import Dataset, kfold_split, save_split, train_val_split
+from solar_filaments.data.yolo_dataset import build_yolo_dataset, build_yolo_obb_dataset
 
 
 def add_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--val-frac", type=float, default=0.1)
+    parser.add_argument("--val-frac", type=float, default=0.1,
+                         help="ignored when --k-folds is set; 0 trains on all data with no held-out val")
     parser.add_argument("--seed", type=int, default=SEED)
+    parser.add_argument("--k-folds", type=int, default=0, help="0 = single split (default); >=2 = k-fold")
+    parser.add_argument("--augment-copy-paste", type=int, default=0,
+                         help="number of synthetic copy-paste training images to generate; 0 = off")
+    parser.add_argument("--max-pastes-per-image", type=int, default=2,
+                         help="max filaments pasted onto a single synthetic image")
+    parser.add_argument("--obb", action="store_true",
+                         help="also build an oriented-bounding-box YOLO dataset (yolo_obb_dataset/) "
+                              "alongside the axis-aligned one")
+
+
+def _prepare_one(dataset, paths, train_ids, val_ids, fold, args):
+    if args.augment_copy_paste > 0:
+        id_prefix = "synthetic" if fold is None else f"fold{fold}-synthetic"
+        synthetic_dir = paths.synthetic_img_dir_for(fold)
+        new_ids = generate_synthetic_images(
+            dataset, paths.train_img_dir, synthetic_dir, train_ids,
+            n_synthetic=args.augment_copy_paste, max_pastes_per_image=args.max_pastes_per_image,
+            seed=args.seed, id_prefix=id_prefix,
+        )
+        print(f"  +{len(new_ids)} synthetic copy-paste images (of {args.augment_copy_paste} requested)")
+        train_ids = train_ids | new_ids
+
+    # Save the split *after* augmentation so train-unet (which loads this file
+    # directly) also sees the synthetic images - only build_yolo_dataset used
+    # to get them, leaving the U-Net stage trained on real data only.
+    save_split(paths.split_path_for(fold), train_ids, val_ids)
+
+    yaml_path = build_yolo_dataset(dataset, paths.train_img_dir, paths.yolo_dir_for(fold),
+                                    train_ids, val_ids, synthetic_img_dir=paths.synthetic_img_dir_for(fold))
+    print(f"  train images: {len(train_ids)}  val images: {len(val_ids)}  -> {yaml_path}")
+
+    if args.obb:
+        obb_yaml_path = build_yolo_obb_dataset(dataset, paths.train_img_dir, paths.yolo_obb_dir_for(fold),
+                                                train_ids, val_ids, synthetic_img_dir=paths.synthetic_img_dir_for(fold))
+        print(f"  OBB dataset -> {obb_yaml_path}")
 
 
 def run(args: argparse.Namespace) -> None:
@@ -25,9 +63,18 @@ def run(args: argparse.Namespace) -> None:
     dataset = Dataset(paths.train_ann_path)
     print(dataset.summary())
 
-    train_ids, val_ids = train_val_split(dataset, args.seed, args.val_frac)
-    print(f"train images: {len(train_ids)}  val images: {len(val_ids)}")
-    save_split(paths.split_path, train_ids, val_ids)
+    if args.k_folds >= 2:
+        splits = kfold_split(dataset, args.seed, args.k_folds)
+        for i, (train_ids, val_ids) in enumerate(splits):
+            print(f"fold {i}:")
+            _prepare_one(dataset, paths, train_ids, val_ids, i, args)
 
-    yaml_path = build_yolo_dataset(dataset, paths.train_img_dir, paths.yolo_dir, train_ids, val_ids)
-    print("YOLO dataset ready at", yaml_path)
+        paths.splits_dir.mkdir(parents=True, exist_ok=True)
+        with open(paths.kfold_meta_path, "w") as f:
+            json.dump({"k": args.k_folds, "seed": args.seed}, f)
+        print(f"k-fold metadata written to {paths.kfold_meta_path}")
+    elif args.k_folds == 1:
+        raise ValueError("--k-folds must be 0 (single split) or >= 2")
+    else:
+        train_ids, val_ids = train_val_split(dataset, args.seed, args.val_frac)
+        _prepare_one(dataset, paths, train_ids, val_ids, None, args)

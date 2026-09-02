@@ -16,19 +16,44 @@ from typing import Tuple
 
 import cv2
 import numpy as np
+from ultralytics.utils.ops import xyxyxyxy2xywhr
 
 
 def pca_angle_deg(points: np.ndarray) -> float:
     """Angle (degrees) of the first principal axis of a set of 2D points."""
+    angle, _ = pca_angle_and_elongation(points)
+    return angle
+
+
+def pca_angle_and_elongation(points: np.ndarray) -> Tuple[float, float]:
+    """Angle (degrees) of the first principal axis, plus an elongation ratio
+    (spread along the principal axis / spread along the secondary axis).
+    Elongation near 1 means the point cloud is roughly round - its principal
+    axis direction is essentially noise, not a meaningful orientation."""
     points = np.asarray(points, dtype=np.float32)
     if len(points) < 2:
-        return 0.0
+        return 0.0, 1.0
     centered = points - points.mean(axis=0)
     if np.allclose(centered, 0):
-        return 0.0
-    _, _, vt = np.linalg.svd(centered, full_matrices=False)
+        return 0.0, 1.0
+    _, s, vt = np.linalg.svd(centered, full_matrices=False)
     vx, vy = vt[0]
-    return float(np.degrees(np.arctan2(vy, vx)))
+    angle = float(np.degrees(np.arctan2(vy, vx)))
+    elongation = float(s[0] / max(s[1], 1e-6)) if len(s) > 1 else 1.0
+    return angle, elongation
+
+
+def minarearect_angle_deg(polygon: np.ndarray) -> float:
+    """Angle (degrees) of the long axis of `polygon`'s minimum-area enclosing
+    rectangle, canonicalized via ultralytics' own `xyxyxyxy2xywhr` (the exact
+    function used to interpret an OBB detector's predictions at inference, in
+    predict_instances_obb) - using the same canonicalization here for training
+    crops (obb_oriented_sample) guarantees both agree on which of the two
+    possible 180-degrees-apart directions is "the" long-axis angle, so
+    training and inference never disagree by a flip."""
+    corners = cv2.boxPoints(cv2.minAreaRect(polygon.astype(np.float32))).astype(np.float32)
+    xywhr = xyxyxyxy2xywhr(corners.reshape(1, 8))[0]
+    return float(np.degrees(xywhr[4]))
 
 
 def crop_patch_with_padding(img: np.ndarray, cx: float, cy: float, half: int) -> Tuple[np.ndarray, int, int]:

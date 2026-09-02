@@ -24,6 +24,13 @@ def add_args(parser: argparse.ArgumentParser) -> None:
                          help="rotate crops so the GT spine lies horizontal, instead of axis-aligned bbox crops "
                               "(saves to a separate unet_spine_best.pt - pair with --spine-orientation at "
                               "evaluate/predict time too)")
+    parser.add_argument("--obb", action="store_true",
+                         help="rotate crops to match the minAreaRect of the GT polygon (same geometry an OBB "
+                              "detector predicts), instead of axis-aligned bbox crops (saves to unet_obb_best.pt - "
+                              "pair with --obb at evaluate/predict time too)")
+    parser.add_argument("--fold", type=int, default=None,
+                         help="train on this fold's data (from `filament prepare --k-folds`); "
+                              "default checkpoint name becomes unet_fold<N>_best.pt")
 
 
 def run(args: argparse.Namespace) -> None:
@@ -33,15 +40,21 @@ def run(args: argparse.Namespace) -> None:
     print("device:", device)
 
     dataset = Dataset(paths.train_ann_path)
-    train_ids, val_ids = load_split(paths.split_path)
+    train_ids, val_ids = load_split(paths.split_path_for(args.fold))
+    synthetic_img_dir = paths.synthetic_img_dir_for(args.fold)
 
-    crop_cfg = CropConfig(crop_size=args.crop_size, use_spine_orientation=args.spine_orientation)
+    crop_cfg = CropConfig(crop_size=args.crop_size, use_spine_orientation=args.spine_orientation,
+                           use_obb_orientation=args.obb)
     train_crop_ds = FilamentCropDataset(dataset, paths.train_img_dir, train_ids,
                                          crop_cfg.crop_size, crop_cfg.pad_factor, crop_cfg.min_crop_side,
-                                         augment=True, use_spine_orientation=crop_cfg.use_spine_orientation)
+                                         augment=True, use_spine_orientation=crop_cfg.use_spine_orientation,
+                                         use_obb_orientation=crop_cfg.use_obb_orientation,
+                                         synthetic_img_dir=synthetic_img_dir)
     val_crop_ds = FilamentCropDataset(dataset, paths.train_img_dir, val_ids,
                                        crop_cfg.crop_size, crop_cfg.pad_factor, crop_cfg.min_crop_side,
-                                       augment=False, use_spine_orientation=crop_cfg.use_spine_orientation)
+                                       augment=False, use_spine_orientation=crop_cfg.use_spine_orientation,
+                                       use_obb_orientation=crop_cfg.use_obb_orientation,
+                                       synthetic_img_dir=synthetic_img_dir)
     print(f"train crops: {len(train_crop_ds)}  val crops: {len(val_crop_ds)}")
 
     train_loader = DataLoader(train_crop_ds, batch_size=args.batch_size, shuffle=True,
@@ -57,7 +70,9 @@ def run(args: argparse.Namespace) -> None:
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
     scaler = torch.amp.GradScaler(device.type, enabled=device.type == "cuda")
 
-    ckpt_name = "unet_spine_best.pt" if args.spine_orientation else "unet_best.pt"
+    ckpt_name = "unet_obb_best.pt" if args.obb else ("unet_spine_best.pt" if args.spine_orientation else "unet_best.pt")
+    if args.fold is not None:
+        ckpt_name = ckpt_name.replace("_best.pt", f"_fold{args.fold}_best.pt")
     ckpt_path = paths.ckpt_dir / ckpt_name
     best_val_dice = 0.0
     for epoch in range(args.epochs):
