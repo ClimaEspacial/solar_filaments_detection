@@ -36,6 +36,10 @@ def add_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--normalize", action="store_true",
                          help="use limb-darkening-flattened + CLAHE-preprocessed images at inference and load "
                               "*_norm-suffixed weights - not combinable with --obb this round")
+    parser.add_argument("--tta", action="store_true",
+                         help="average the U-Net's prediction over 4 flips (identity/h/v/hv), only trusting the "
+                              "average when it doesn't change the single-view mask's topology (area/Dice/"
+                              "component-count guards) - inference-only, no retraining, no separate weights")
     parser.add_argument("--fold", type=int, default=None,
                          help="use this fold's weights (from `filament prepare --k-folds`); "
                               "default: no fold suffix (the single-split model)")
@@ -84,6 +88,7 @@ def run(args: argparse.Namespace) -> None:
                 pad_factor=crop_cfg.pad_factor, min_crop_side=crop_cfg.min_crop_side,
                 mask_thresh=inference_cfg.mask_thresh, min_instance_area=inference_cfg.min_instance_area,
                 mask_nms_thresh=inference_cfg.mask_nms_thresh, mask_conf_thres=inference_cfg.mask_conf_thres,
+                use_tta=args.tta,
             )
         else:
             label_map, _ = predict_instances(
@@ -94,7 +99,7 @@ def run(args: argparse.Namespace) -> None:
                 mask_thresh=inference_cfg.mask_thresh, min_instance_area=inference_cfg.min_instance_area,
                 mask_nms_thresh=inference_cfg.mask_nms_thresh, mask_conf_thres=inference_cfg.mask_conf_thres,
                 use_spine_orientation=crop_cfg.use_spine_orientation, min_elongation=inference_cfg.min_elongation,
-                preprocess=args.normalize,
+                preprocess=args.normalize, use_tta=args.tta,
             )
         for inst_id in range(1, int(label_map.max()) + 1):
             mask = label_map == inst_id

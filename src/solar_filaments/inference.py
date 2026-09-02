@@ -54,6 +54,81 @@ def _segment(unet_model, device, crop: np.ndarray, crop_size: int, mask_thresh: 
     return mask_letterboxed, prob, scale, left, top
 
 
+_TTA_FLIPS = ("identity", "hflip", "vflip", "hvflip")
+
+
+def _apply_flip(arr: np.ndarray, transform: str) -> np.ndarray:
+    if transform == "identity":
+        return arr
+    if transform == "hflip":
+        return arr[:, ::-1]
+    if transform == "vflip":
+        return arr[::-1, :]
+    if transform == "hvflip":
+        return arr[::-1, ::-1]
+    raise ValueError(f"unknown flip transform: {transform!r}")
+
+
+def _segment_tta(unet_model, device, crop: np.ndarray, crop_size: int, mask_thresh: float,
+                  area_ratio_min: float = 0.6, area_ratio_max: float = 1.7,
+                  dice_min: float = 0.62, min_control_area: int = 32):
+    """Like _segment, but averages the U-Net's probability map over 4 flips
+    (identity/h/v/hv - each is its own inverse, so un-flipping the output
+    just re-applies the same transform) and only trusts that average if it
+    doesn't change the single-view mask's topology: area within
+    [area_ratio_min, area_ratio_max] of the single-view mask, connected-
+    component count not increased by more than 1 (no new fragmentation), and
+    (once the single-view mask is large enough to make Dice meaningful) Dice
+    overlap >= dice_min against it. Otherwise falls back to the plain
+    single-view result. Cheap (extra forward passes only, no retraining) and
+    orthogonal to every other change in this pipeline - flipping doesn't
+    change letterbox_resize's scale/left/top (they depend only on crop
+    shape), so the returned (scale, left, top) always match the single-view
+    ones a caller already expects from _segment."""
+    single_mask = single_prob = scale = left = top = None
+    prob_sum = None
+    for transform in _TTA_FLIPS:
+        flipped_crop = _apply_flip(crop, transform)
+        mask_lb, prob, s, l, t = _segment(unet_model, device, flipped_crop, crop_size, mask_thresh)
+        prob = _apply_flip(prob, transform)
+        if transform == "identity":
+            single_mask = (prob > mask_thresh).astype(np.uint8)
+            single_prob, scale, left, top = prob, s, l, t
+        prob_sum = prob if prob_sum is None else prob_sum + prob
+
+    tta_prob = prob_sum / len(_TTA_FLIPS)
+    tta_mask = (tta_prob > mask_thresh).astype(np.uint8)
+
+    single_area = int(single_mask.sum())
+    tta_area = int(tta_mask.sum())
+    if single_area == 0 or tta_area == 0:
+        return single_mask, single_prob, scale, left, top
+
+    area_ratio = tta_area / single_area
+    if not (area_ratio_min <= area_ratio <= area_ratio_max):
+        return single_mask, single_prob, scale, left, top
+
+    single_components = cv2.connectedComponents(single_mask, connectivity=8)[0] - 1
+    tta_components = cv2.connectedComponents(tta_mask, connectivity=8)[0] - 1
+    if tta_components > max(single_components + 1, 2):
+        return single_mask, single_prob, scale, left, top
+
+    if single_area >= min_control_area:
+        intersection = int(np.logical_and(single_mask > 0, tta_mask > 0).sum())
+        denom = single_area + tta_area
+        dice = 2 * intersection / denom if denom else 1.0
+        if dice < dice_min:
+            return single_mask, single_prob, scale, left, top
+
+    return tta_mask, tta_prob, scale, left, top
+
+
+def _segment_maybe_tta(unet_model, device, crop: np.ndarray, crop_size: int, mask_thresh: float, use_tta: bool):
+    if use_tta:
+        return _segment_tta(unet_model, device, crop, crop_size, mask_thresh)
+    return _segment(unet_model, device, crop, crop_size, mask_thresh)
+
+
 def _claim_candidate(label_map: np.ndarray, candidate: np.ndarray, sy1: int, sx1: int,
                       next_id: int, min_instance_area: int, mask_nms_thresh: float) -> bool:
     """Try to claim `candidate` (a bool array) at label_map[sy1:.., sx1:..] as
@@ -83,7 +158,7 @@ def predict_instances(image_path: Path, yolo_model, unet_model, device: torch.de
                        mask_thresh: float = 0.5, min_instance_area: int = 25,
                        mask_nms_thresh: float = 0.4, mask_conf_thres: float = 0.0,
                        use_spine_orientation: bool = False, min_elongation: float = 1.5,
-                       preprocess: bool = False
+                       preprocess: bool = False, use_tta: bool = False
                        ) -> Tuple[np.ndarray, List[float]]:
     img = load_image(image_path, preprocess=preprocess)
     H, W = img.shape
@@ -108,7 +183,8 @@ def predict_instances(image_path: Path, yolo_model, unet_model, device: torch.de
             continue
 
         crop = img[cy1:cy2, cx1:cx2]
-        mask_letterboxed, prob, scale, left, top = _segment(unet_model, device, crop, crop_size, mask_thresh)
+        mask_letterboxed, prob, scale, left, top = _segment_maybe_tta(unet_model, device, crop, crop_size,
+                                                                       mask_thresh, use_tta)
 
         if mask_conf_thres > 0.0:
             covered = mask_letterboxed > 0
@@ -156,7 +232,8 @@ def predict_instances(image_path: Path, yolo_model, unet_model, device: torch.de
             continue
 
         crop2 = rotated_patch[rcy1:rcy2, rcx1:rcx2]
-        mask2_letterboxed, prob2, scale2, left2, top2 = _segment(unet_model, device, crop2, crop_size, mask_thresh)
+        mask2_letterboxed, prob2, scale2, left2, top2 = _segment_maybe_tta(unet_model, device, crop2, crop_size,
+                                                                            mask_thresh, use_tta)
 
         if mask_conf_thres > 0.0:
             covered2 = mask2_letterboxed > 0
@@ -186,7 +263,8 @@ def predict_instances_obb(image_path: Path, yolo_model, unet_model, device: torc
                            conf_thres: float = 0.25, iou_thres: float = 0.5, imgsz: int = 1024,
                            crop_size: int = 256, pad_factor: float = 1.35, min_crop_side: int = 48,
                            mask_thresh: float = 0.5, min_instance_area: int = 25,
-                           mask_nms_thresh: float = 0.4, mask_conf_thres: float = 0.0
+                           mask_nms_thresh: float = 0.4, mask_conf_thres: float = 0.0,
+                           use_tta: bool = False
                            ) -> Tuple[np.ndarray, List[float]]:
     """Single-pass instance pipeline for an OBB-trained YOLO: the detector
     already predicts the filament's orientation directly (no bootstrapping
@@ -231,7 +309,8 @@ def predict_instances_obb(image_path: Path, yolo_model, unet_model, device: torc
             continue
 
         crop = rotated_patch[rcy1:rcy2, rcx1:rcx2]
-        mask_letterboxed, prob, scale, left, top = _segment(unet_model, device, crop, crop_size, mask_thresh)
+        mask_letterboxed, prob, scale, left, top = _segment_maybe_tta(unet_model, device, crop, crop_size,
+                                                                       mask_thresh, use_tta)
 
         if mask_conf_thres > 0.0:
             covered = mask_letterboxed > 0

@@ -45,6 +45,10 @@ def add_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--normalize", action="store_true",
                          help="use limb-darkening-flattened + CLAHE-preprocessed images at inference and load "
                               "*_norm-suffixed weights - not combinable with --obb this round")
+    parser.add_argument("--tta", action="store_true",
+                         help="average the U-Net's prediction over 4 flips (identity/h/v/hv), only trusting the "
+                              "average when it doesn't change the single-view mask's topology (area/Dice/"
+                              "component-count guards) - inference-only, no retraining, no separate weights")
     parser.add_argument("--fold", default=None,
                          help="evaluate this fold (int, from `filament prepare --k-folds`), or 'all' to pool "
                               "out-of-fold PQ across every fold's own held-out val set")
@@ -135,7 +139,7 @@ def _run_all_folds(paths: Paths, args: argparse.Namespace, dataset, device, crop
         _, val_ids = load_split(paths.split_path_for(fold))
         gt_df, pred_df = build_val_gt_pred_dataframes(
             dataset, paths.train_img_dir, sorted(val_ids), yolo_model, unet_model, device, crop_cfg, inference_cfg,
-            obb=args.obb, preprocess=args.normalize)
+            obb=args.obb, preprocess=args.normalize, use_tta=args.tta)
         print(f"[fold {fold}] GT filaments: {len(gt_df)}   predicted filaments: {len(pred_df)}")
         all_gt.append(gt_df)
         all_pred.append(pred_df)
@@ -278,7 +282,7 @@ def run(args: argparse.Namespace) -> None:
     def run_self_eval(image_ids, label):
         gt_df, pred_df = build_val_gt_pred_dataframes(
             dataset, paths.train_img_dir, image_ids, yolo_model, unet_model, device, crop_cfg, inference_cfg,
-            obb=args.obb, preprocess=args.normalize)
+            obb=args.obb, preprocess=args.normalize, use_tta=args.tta)
         print(f"[{label}] GT filaments: {len(gt_df)}   predicted filaments: {len(pred_df)}")
         overlap_df = get_overlap_df(gt_df, pred_df)
         pq_score = get_pq_score(overlap_df)
