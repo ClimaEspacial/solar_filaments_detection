@@ -18,12 +18,14 @@ from solar_filaments.eval.self_eval import build_val_gt_pred_dataframes, build_v
     summarize_overlap
 
 
+from solar_filaments.inference import predict_instances, predict_instances_obb
+from solar_filaments.models.unet import EdgeAttUNet
+
+
 def _score(overlap_df: pd.DataFrame, label: str) -> float:
     summary = summarize_overlap(overlap_df)
     print(f"[{label}] {format_summary(summary)}")
     return summary["PQ"]
-from solar_filaments.inference import predict_instances, predict_instances_obb
-from solar_filaments.models.unet import EdgeAttUNet
 
 
 def add_args(parser: argparse.ArgumentParser) -> None:
@@ -60,6 +62,12 @@ def add_args(parser: argparse.ArgumentParser) -> None:
                          help="average the U-Net's prediction over 4 flips (identity/h/v/hv), only trusting the "
                               "average when it doesn't change the single-view mask's topology (area/Dice/"
                               "component-count guards) - inference-only, no retraining, no separate weights")
+    parser.add_argument("--semantic-thres", type=float, default=0.0,
+                         help="reject a candidate whose mean Flat U-Net full-disk probability is below this "
+                              "(0 = off). An independent second opinion on low-confidence detections, which "
+                              "neither the box score nor the saturated refiner confidence provides")
+    parser.add_argument("--semantic-weights", default=None,
+                         help="default: work_dir/checkpoints/flat_unet[_fold<N>]_best.pt")
     add_backend_args(parser)
     parser.add_argument("--fold", default=None,
                          help="evaluate this fold (int, from `filament prepare --k-folds`), or 'all' to pool "
@@ -105,6 +113,17 @@ def _default_weights(paths: Paths, args: argparse.Namespace, fold):
     yolo_weights = args.yolo_weights or str(paths.runs_dir / name / "weights" / "best.pt")
     unet_weights = args.unet_weights or str(paths.ckpt_dir / unet_name)
     return yolo_weights, unet_weights
+
+
+def _load_segmenter(paths: Paths, args: argparse.Namespace, device, fold):
+    """The Flat U-Net full-disk branch, or None when --semantic-thres is off."""
+    if args.semantic_thres <= 0.0:
+        return None
+    from solar_filaments.detectors.fulldisk import FullDiskSegmenter, load_flat_unet
+    name = f"flat_unet_fold{fold}_best.pt" if fold is not None else "flat_unet_best.pt"
+    weights = args.semantic_weights or str(paths.ckpt_dir / name)
+    model, imgsz = load_flat_unet(weights, device)
+    return FullDiskSegmenter(model, device, imgsz=imgsz)
 
 
 def _load_unet(paths: Paths, args: argparse.Namespace, device, fold):
@@ -169,7 +188,8 @@ def _run_all_folds(paths: Paths, args: argparse.Namespace, dataset, device, crop
             predict_fn = _backend_predict_fn(paths, args, device, fold, crop_cfg, inference_cfg)
         gt_df, pred_df = build_val_gt_pred_dataframes(
             dataset, paths.train_img_dir, sorted(val_ids), yolo_model, unet_model, device, crop_cfg, inference_cfg,
-            obb=args.obb, preprocess=args.normalize, use_tta=args.tta, predict_fn=predict_fn)
+            obb=args.obb, preprocess=args.normalize, use_tta=args.tta, predict_fn=predict_fn,
+            segmenter=_load_segmenter(paths, args, device, fold), semantic_thres=args.semantic_thres)
         print(f"[fold {fold}] GT filaments: {len(gt_df)}   predicted filaments: {len(pred_df)}")
         all_gt.append(gt_df)
         all_pred.append(pred_df)
@@ -307,12 +327,14 @@ def run(args: argparse.Namespace) -> None:
     else:
         yolo_model = unet_model = None
         predict_fn = _backend_predict_fn(paths, args, device, fold, crop_cfg, inference_cfg)
+    segmenter = _load_segmenter(paths, args, device, fold)
     _, val_ids = load_split(paths.split_path_for(fold))
 
     def run_self_eval(image_ids, label):
         gt_df, pred_df = build_val_gt_pred_dataframes(
             dataset, paths.train_img_dir, image_ids, yolo_model, unet_model, device, crop_cfg, inference_cfg,
-            obb=args.obb, preprocess=args.normalize, use_tta=args.tta, predict_fn=predict_fn)
+            obb=args.obb, preprocess=args.normalize, use_tta=args.tta, predict_fn=predict_fn,
+            segmenter=segmenter, semantic_thres=args.semantic_thres)
         print(f"[{label}] GT filaments: {len(gt_df)}   predicted filaments: {len(pred_df)}")
         overlap_df = get_overlap_df(gt_df, pred_df)
         return overlap_df, _score(overlap_df, label)

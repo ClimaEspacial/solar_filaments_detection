@@ -44,6 +44,11 @@ def add_args(parser: argparse.ArgumentParser) -> None:
                          help="average the U-Net's prediction over 4 flips (identity/h/v/hv), only trusting the "
                               "average when it doesn't change the single-view mask's topology (area/Dice/"
                               "component-count guards) - inference-only, no retraining, no separate weights")
+    parser.add_argument("--semantic-thres", type=float, default=0.0,
+                         help="reject a candidate whose mean Flat U-Net full-disk probability is below this "
+                              "(0 = off); independent second opinion on low-confidence detections")
+    parser.add_argument("--semantic-weights", default=None,
+                         help="default: work_dir/checkpoints/flat_unet[_fold<N>]_best.pt")
     add_backend_args(parser)
     parser.add_argument("--fold", type=int, default=None,
                          help="use this fold's weights (from `filament prepare --k-folds`); "
@@ -78,6 +83,13 @@ def run(args: argparse.Namespace) -> None:
     inference_cfg = InferenceConfig(conf_thres=args.conf_thres, iou_thres=args.iou_thres, imgsz=args.imgsz,
                                      mask_nms_thresh=args.mask_nms_thresh, mask_conf_thres=args.mask_conf_thres,
                                      mask_thresh=args.mask_thresh, min_elongation=args.min_elongation)
+
+    segmenter = None
+    if args.semantic_thres > 0.0:
+        from solar_filaments.detectors.fulldisk import FullDiskSegmenter, load_flat_unet
+        sem_name = f"flat_unet_fold{args.fold}_best.pt" if args.fold is not None else "flat_unet_best.pt"
+        sem_model, sem_imgsz = load_flat_unet(args.semantic_weights or str(paths.ckpt_dir / sem_name), device)
+        segmenter = FullDiskSegmenter(sem_model, device, imgsz=sem_imgsz)
 
     if args.detector == "yolo":
         yolo_model = YOLO(yolo_weights)
@@ -114,6 +126,7 @@ def run(args: argparse.Namespace) -> None:
                 mask_nms_thresh=inference_cfg.mask_nms_thresh, mask_conf_thres=inference_cfg.mask_conf_thres,
                 use_spine_orientation=crop_cfg.use_spine_orientation, min_elongation=inference_cfg.min_elongation,
                 preprocess=args.normalize, use_tta=args.tta,
+                segmenter=segmenter, semantic_thres=args.semantic_thres,
             )
         for inst_id in range(1, int(label_map.max()) + 1):
             mask = label_map == inst_id

@@ -270,7 +270,8 @@ def build_val_gt_pred_dataframes(dataset: Dataset, train_img_dir: Path, image_id
                                   yolo_model, unet_model, device: torch.device,
                                   crop_cfg, inference_cfg, obb: bool = False,
                                   preprocess: bool = False, use_tta: bool = False,
-                                  predict_fn: Optional[Callable[[Path], Tuple[np.ndarray, list]]] = None):
+                                  predict_fn: Optional[Callable[[Path], Tuple[np.ndarray, list]]] = None,
+                                  segmenter=None, semantic_thres: float = 0.0):
     """Ground-truth and prediction dataframes in the exact submission schema
     (filament_id, segmentation_rle), so they can be fed straight into the
     organizers' own scoring functions above. `predict_fn(image_path) ->
@@ -309,6 +310,7 @@ def build_val_gt_pred_dataframes(dataset: Dataset, train_img_dir: Path, image_id
                 mask_nms_thresh=inference_cfg.mask_nms_thresh, mask_conf_thres=inference_cfg.mask_conf_thres,
                 use_spine_orientation=crop_cfg.use_spine_orientation, min_elongation=inference_cfg.min_elongation,
                 preprocess=preprocess, use_tta=use_tta,
+                segmenter=segmenter, semantic_thres=semantic_thres,
             )
         stem_rows = []
         for inst_id in range(1, int(label_map.max()) + 1):

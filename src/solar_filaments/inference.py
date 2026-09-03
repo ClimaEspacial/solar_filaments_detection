@@ -39,6 +39,7 @@ from ultralytics.utils.ops import xyxyxyxy2xywhr
 
 from solar_filaments.data.coco import load_image
 from solar_filaments.data.crop_dataset import letterbox_resize, padded_rect_crop, undo_letterbox
+from solar_filaments.detectors.fulldisk import semantic_score
 from solar_filaments.data.oriented_crop import (apply_affine_points, clip_patch_to_image,
                                                  crop_patch_with_padding, patch_half_size,
                                                  pca_angle_and_elongation, rotation_matrix)

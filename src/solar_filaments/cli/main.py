@@ -1,6 +1,6 @@
 import argparse
 
-from solar_filaments.cli import evaluate, predict, prepare, train_maskrcnn, train_unet, train_yolo
+from solar_filaments.cli import evaluate, predict, prepare, train_fulldisk, train_maskrcnn, train_unet, train_yolo
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -12,6 +12,7 @@ def build_parser() -> argparse.ArgumentParser:
         "train-yolo": train_yolo,
         "train-maskrcnn": train_maskrcnn,
         "train-unet": train_unet,
+        "train-fulldisk": train_fulldisk,
         "evaluate": evaluate,
         "predict": predict,
     }
