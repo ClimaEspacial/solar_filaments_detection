@@ -4,6 +4,7 @@ import pandas as pd
 import torch
 from ultralytics import YOLO
 
+from solar_filaments.cli._backends import add_backend_args, build_detector, make_predict_fn
 from solar_filaments.config import CropConfig, InferenceConfig, Paths, UNetConfig, YoloConfig
 from solar_filaments.inference import predict_instances, predict_instances_obb
 from solar_filaments.models.unet import EdgeAttUNet
@@ -40,6 +41,7 @@ def add_args(parser: argparse.ArgumentParser) -> None:
                          help="average the U-Net's prediction over 4 flips (identity/h/v/hv), only trusting the "
                               "average when it doesn't change the single-view mask's topology (area/Dice/"
                               "component-count guards) - inference-only, no retraining, no separate weights")
+    add_backend_args(parser)
     parser.add_argument("--fold", type=int, default=None,
                          help="use this fold's weights (from `filament prepare --k-folds`); "
                               "default: no fold suffix (the single-split model)")
@@ -64,7 +66,6 @@ def run(args: argparse.Namespace) -> None:
     unet_weights = args.unet_weights or str(paths.ckpt_dir / default_unet_name)
     out_path = args.out or str(paths.work_dir / "submission.csv")
 
-    yolo_model = YOLO(yolo_weights)
     norm_layer = "instance" if args.instance_norm else "batch"
     unet_model = EdgeAttUNet(use_edge_attention=UNetConfig().use_edge_attention, norm_layer=norm_layer).to(device)
     unet_model.load_state_dict(torch.load(unet_weights, map_location=device))
@@ -75,12 +76,22 @@ def run(args: argparse.Namespace) -> None:
                                      mask_nms_thresh=args.mask_nms_thresh, mask_conf_thres=args.mask_conf_thres,
                                      min_elongation=args.min_elongation)
 
+    if args.detector == "yolo":
+        yolo_model = YOLO(yolo_weights)
+        backend_predict = None
+    else:
+        detector = build_detector(args, paths, device, args.fold, inference_cfg)
+        backend_predict = make_predict_fn(args, detector, unet_model, device, crop_cfg, inference_cfg,
+                                          preprocess=args.normalize, use_tta=args.tta)
+
     test_image_paths = sorted(paths.test_img_dir.glob("*.jpeg"))
     submission_rows = []
 
     for path in test_image_paths:
         image_id = path.stem
-        if args.obb:
+        if backend_predict is not None:
+            label_map, _ = backend_predict(path)
+        elif args.obb:
             label_map, _ = predict_instances_obb(
                 path, yolo_model, unet_model, device,
                 conf_thres=inference_cfg.conf_thres, iou_thres=inference_cfg.iou_thres,

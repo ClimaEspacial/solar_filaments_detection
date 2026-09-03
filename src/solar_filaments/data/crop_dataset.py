@@ -16,6 +16,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset as TorchDataset
 
+from solar_filaments.data.augment_ops import random_gamma
 from solar_filaments.data.coco import Dataset, load_image, polygon_to_mask
 from solar_filaments.data.oriented_crop import (apply_affine_points, crop_patch_with_padding,
                                                  minarearect_angle_deg, patch_half_size, pca_angle_deg,
@@ -169,15 +170,7 @@ class FilamentCropDataset(TorchDataset):
                 if k:
                     crop = np.rot90(crop, k).copy()
                     mask = np.rot90(mask, k).copy()
-            if random.random() < 0.9:
-                # gamma correction, not a plain linear gain/bias jitter - trains
-                # invariance to the kind of nonlinear intensity variation (limb
-                # darkening, exposure/seeing differences) real across this dataset;
-                # range and probability match the augmentation recipe in "A Modern
-                # ConvNet for Solar Filament Detection" (arXiv:2607.24525, Table 1).
-                gamma = random.uniform(0.5, 1.5)
-                normalized = crop.astype(np.float32) / 255.0
-                crop = np.clip((normalized ** gamma) * 255.0, 0, 255).astype(np.uint8)
+            crop = random_gamma(crop)  # see data/augment_ops.py for the rationale
 
         crop_t = torch.from_numpy(crop).float().unsqueeze(0) / 255.0
         mask_t = torch.from_numpy(mask).float().unsqueeze(0)

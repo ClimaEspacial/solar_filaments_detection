@@ -72,6 +72,142 @@ def polygon_to_mask(segmentation: List[float], height: int, width: int) -> np.nd
     return mask
 
 
+def _bbox_of_mask(mask: np.ndarray) -> List[float]:
+    ys, xs = np.where(mask)
+    x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
+    return [float(x0), float(y0), float(x1 - x0 + 1), float(y1 - y0 + 1)]
+
+
+def _polygon_of_mask(mask: np.ndarray) -> List[float]:
+    """Flat [x0,y0,x1,y1,...] polygon of the largest external contour of `mask`
+    (the MAGFiLO single-polygon segmentation format)."""
+    contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return []
+    largest = max(contours, key=cv2.contourArea)
+    return largest.reshape(-1, 2).astype(float).flatten().tolist()
+
+
+def _mask_iou_in_window(a: np.ndarray, b: np.ndarray, bbox_a, bbox_b) -> float:
+    """IoU of two full-image masks, computed only inside the union of their
+    bboxes (a 2048x2048 boolean op per pair would dominate prepare time)."""
+    ax, ay, aw, ah = bbox_a
+    bx, by, bw, bh = bbox_b
+    if ax > bx + bw or bx > ax + aw or ay > by + bh or by > ay + ah:
+        return 0.0
+    x0, y0 = int(min(ax, bx)), int(min(ay, by))
+    x1, y1 = int(max(ax + aw, bx + bw)) + 1, int(max(ay + ah, by + bh)) + 1
+    wa, wb = a[y0:y1, x0:x1], b[y0:y1, x0:x1]
+    union = np.logical_or(wa, wb).sum()
+    return float(np.logical_and(wa, wb).sum() / union) if union else 0.0
+
+
+ANNOTATOR_MERGE_MODES = ("single", "union", "majority")
+
+
+def merge_annotator_records(dataset: "Dataset", file_name: str, mode: str = "majority") -> List[dict]:
+    """One consensus instance list for a physical image that may carry 1-3
+    independent annotator records.
+
+    Instances are clustered across annotators with the evaluator's own matching
+    rule (mask IoU > 0.5, at most one member per annotator per cluster, greedy
+    best-IoU-first). Each cluster becomes one annotation dict in the usual
+    MAGFiLO shape (`segmentation` flat polygon, `bbox`, `category_id`) whose mask
+    is the *union* of its members' polygons - the target should capture a
+    filament's full extent - plus `support` = fraction of annotators who marked
+    it and `n_annotators`.
+
+    mode: "single"   - the first record only (what a per-record label file
+                       effectively did before, modulo which record won);
+          "union"    - every cluster, whatever its support;
+          "majority" - clusters with support >= 0.5. PQ is pooled over every
+                       annotator-record separately, so predicting a filament
+                       only a minority of annotators marked costs more (FP
+                       against the others) than it earns - this is the
+                       PQ-optimal target set to train a detector on.
+    Single-annotator images are identical under all three modes."""
+    if mode not in ANNOTATOR_MERGE_MODES:
+        raise ValueError(f"unknown annotator merge mode {mode!r}, expected one of {ANNOTATOR_MERGE_MODES}")
+    ids = dataset.file_name_to_image_ids[file_name]
+    n_annotators = len(ids)
+    if mode == "single" or n_annotators == 1:
+        out = []
+        for ann in dataset.anns_by_image[ids[0]]:
+            merged = dict(ann)
+            merged["support"], merged["n_annotators"] = 1.0, n_annotators
+            out.append(merged)
+        return out
+
+    info = dataset.images_by_id[ids[0]]
+    H, W = info["height"], info["width"]
+
+    clusters: List[dict] = []  # {"mask", "bbox", "members": [(annotator_idx, ann)]}
+    for k, img_id in enumerate(ids):
+        anns = dataset.anns_by_image[img_id]
+        masks = [polygon_to_mask(a["segmentation"], H, W).astype(bool) for a in anns]
+        # best-IoU-first greedy assignment, one member per annotator per cluster
+        pairs = []
+        for ai, (a, m) in enumerate(zip(anns, masks)):
+            for ci, c in enumerate(clusters):
+                if any(mk == k for mk, _ in c["members"]):
+                    continue
+                iou = _mask_iou_in_window(m, c["mask"], a["bbox"], c["bbox"])
+                if iou > 0.5:
+                    pairs.append((iou, ai, ci))
+        pairs.sort(reverse=True)
+        assigned_anns, taken_clusters = set(), set()
+        for iou, ai, ci in pairs:
+            if ai in assigned_anns or ci in taken_clusters:
+                continue
+            c = clusters[ci]
+            c["mask"] |= masks[ai]
+            c["bbox"] = _bbox_of_mask(c["mask"])
+            c["members"].append((k, anns[ai]))
+            assigned_anns.add(ai)
+            taken_clusters.add(ci)
+        for ai, (a, m) in enumerate(zip(anns, masks)):
+            if ai not in assigned_anns:
+                clusters.append({"mask": m.copy(), "bbox": list(a["bbox"]), "members": [(k, a)]})
+
+    out = []
+    for c in clusters:
+        support = len(c["members"]) / n_annotators
+        if mode == "majority" and support < 0.5:
+            continue
+        polygon = _polygon_of_mask(c["mask"])
+        if len(polygon) < 6:
+            continue
+        cats = collections.Counter(a.get("category_id", 1) for _, a in c["members"])
+        first = c["members"][0][1]
+        out.append({
+            "segmentation": polygon,
+            "bbox": _bbox_of_mask(c["mask"]),
+            "area": float(c["mask"].sum()),
+            "iscrowd": 0,
+            "spine": first.get("spine", []),
+            "category_id": cats.most_common(1)[0][0],
+            "id": f"{first.get('id', '')}-merged",
+            "image_id": ids[0],
+            "support": support,
+            "n_annotators": n_annotators,
+        })
+    return out
+
+
+def merged_records(dataset: "Dataset", image_ids, mode: str = "majority") -> List[Tuple[str, dict, List[dict]]]:
+    """Group `image_ids` (a split) by physical image and merge each one's
+    annotator records. Splits are built per file_name, so every record of a
+    file is either entirely in or entirely out of `image_ids`. Returns
+    (file_name, image_info, merged_anns) per unique image, in a stable order."""
+    ids = set(image_ids)
+    seen = []
+    for file_name, rec_ids in dataset.file_name_to_image_ids.items():
+        if any(i in ids for i in rec_ids):
+            seen.append(file_name)
+    return [(fn, dataset.images_by_id[dataset.file_name_to_image_ids[fn][0]],
+             merge_annotator_records(dataset, fn, mode)) for fn in seen]
+
+
 def load_image(path: Path, preprocess: bool = False) -> np.ndarray:
     img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
     if img is None:

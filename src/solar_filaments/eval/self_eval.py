@@ -17,7 +17,7 @@ local PQ/plots match the real grader exactly.
 """
 from collections import Counter
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -128,6 +128,56 @@ def get_pq_score(overlap_df: pd.DataFrame) -> float:
     return (sum(tp_iou_scores) / denominator) if denominator > 0 else 0.0
 
 
+def summarize_overlap(overlap_df: pd.DataFrame) -> dict:
+    """PQ plus the decomposition that says *why* it is what it is: SQ (mean IoU
+    of true positives), RQ (the F1-like detection term, PQ = SQ * RQ), the GT
+    miss rate and prediction FP rate, and the fragmentation (one GT hit by 2+
+    predictions) / over-merge (one prediction hitting 2+ GT) rates. Same
+    matching rule as get_pq_score (IoU > 0.5) for TP/FP/FN, and any overlap
+    for the 1:n / n:1 relations, matching plot_m2n_counts."""
+    iou_threshold = 0.5
+    tp_ious, fp, fn = [], 0, 0
+    gt_degree, pred_degree = [], []
+    for row in overlap_df.itertuples(index=False):
+        iou_matrix, n_gt, n_pred = row.iou_matrix, row.n_gt, row.n_pred
+        if n_gt == 0:
+            fp += n_pred
+            pred_degree.extend([0] * n_pred)
+            continue
+        if n_pred == 0:
+            fn += n_gt
+            gt_degree.extend([0] * n_gt)
+            continue
+        hit = iou_matrix > iou_threshold
+        tp_ious.extend(iou_matrix[hit].tolist())
+        fp += fp_count_hit(hit)
+        fn += fn_count_hit(hit)
+        any_overlap = iou_matrix > 0
+        gt_degree.extend(any_overlap.sum(dim=1).tolist())
+        pred_degree.extend(any_overlap.sum(dim=0).tolist())
+
+    tp = len(tp_ious)
+    denom = tp + 0.5 * fp + 0.5 * fn
+    gt_degree, pred_degree = np.asarray(gt_degree), np.asarray(pred_degree)
+    return {
+        "PQ": (sum(tp_ious) / denom) if denom else 0.0,
+        "SQ": float(np.mean(tp_ious)) if tp else 0.0,
+        "RQ": (tp / denom) if denom else 0.0,
+        "TP": tp, "FP": fp, "FN": fn,
+        "gt_miss_rate": float((gt_degree == 0).mean()) if gt_degree.size else 0.0,
+        "pred_fp_rate": float((pred_degree == 0).mean()) if pred_degree.size else 0.0,
+        "fragmentation_rate": float((gt_degree >= 2).mean()) if gt_degree.size else 0.0,
+        "overmerge_rate": float((pred_degree >= 2).mean()) if pred_degree.size else 0.0,
+    }
+
+
+def format_summary(s: dict) -> str:
+    return (f"PQ={s['PQ']:.4f}  (SQ={s['SQ']:.3f} x RQ={s['RQ']:.3f})  "
+            f"TP={s['TP']} FP={s['FP']} FN={s['FN']}  "
+            f"GT miss={s['gt_miss_rate']:.1%}  pred FP={s['pred_fp_rate']:.1%}  "
+            f"fragmented={s['fragmentation_rate']:.1%}  over-merged={s['overmerge_rate']:.1%}")
+
+
 def plot_distribution(matrices: pd.Series, title: str, x_label: str):
     scores = np.concatenate([np.asarray(m, dtype=float).ravel() for m in matrices] or [np.zeros(0)])
     scores = scores[scores > 0]
@@ -219,10 +269,13 @@ def _gt_rows_for_image(dataset: Dataset, img_id) -> list:
 def build_val_gt_pred_dataframes(dataset: Dataset, train_img_dir: Path, image_ids,
                                   yolo_model, unet_model, device: torch.device,
                                   crop_cfg, inference_cfg, obb: bool = False,
-                                  preprocess: bool = False, use_tta: bool = False):
+                                  preprocess: bool = False, use_tta: bool = False,
+                                  predict_fn: Optional[Callable[[Path], Tuple[np.ndarray, list]]] = None):
     """Ground-truth and prediction dataframes in the exact submission schema
     (filament_id, segmentation_rle), so they can be fed straight into the
-    organizers' own scoring functions above."""
+    organizers' own scoring functions above. `predict_fn(image_path) ->
+    (label_map, scores)` overrides the built-in YOLO/OBB paths (used for the
+    detector backends in `detectors/`); yolo_model/unet_model are then unused."""
     gt_rows = []
     pred_rows_by_stem = {}  # image_stem -> rows; multiple annotator img_ids can
                              # share one physical file, so predict once per file.
@@ -234,7 +287,9 @@ def build_val_gt_pred_dataframes(dataset: Dataset, train_img_dir: Path, image_id
         if image_stem in pred_rows_by_stem:
             continue  # already predicted for this physical image via another annotator's img_id
 
-        if obb:
+        if predict_fn is not None:
+            label_map, _ = predict_fn(train_img_dir / info["file_name"])
+        elif obb:
             label_map, _ = predict_instances_obb(
                 train_img_dir / info["file_name"], yolo_model, unet_model, device,
                 conf_thres=inference_cfg.conf_thres, iou_thres=inference_cfg.iou_thres,

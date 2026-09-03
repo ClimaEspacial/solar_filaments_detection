@@ -7,8 +7,8 @@ import torch
 
 from solar_filaments.config import SEED, Paths
 from solar_filaments.data.augment import generate_synthetic_images
-from solar_filaments.data.coco import Dataset, kfold_split, save_split, train_val_split
-from solar_filaments.data.yolo_dataset import build_yolo_dataset, build_yolo_obb_dataset
+from solar_filaments.data.coco import ANNOTATOR_MERGE_MODES, Dataset, kfold_split, save_split, train_val_split
+from solar_filaments.data.yolo_dataset import build_yolo_dataset, build_yolo_obb_dataset, build_yolo_seg_dataset
 
 
 def add_args(parser: argparse.ArgumentParser) -> None:
@@ -27,6 +27,13 @@ def add_args(parser: argparse.ArgumentParser) -> None:
                          help="also build a limb-darkening-flattened + CLAHE-preprocessed axis-aligned YOLO "
                               "dataset (yolo_norm_dataset/), for `train-yolo --normalize`. Not combinable with "
                               "--obb this round")
+    parser.add_argument("--seg", action="store_true",
+                         help="also build an instance-segmentation (polygon-label) YOLO dataset "
+                              "(yolo_seg_dataset/), for `train-yolo --seg`")
+    parser.add_argument("--annotator-merge", choices=ANNOTATOR_MERGE_MODES, default="majority",
+                         help="how to turn 1-3 annotator records per image into one detector target set: "
+                              "'majority' = filaments >=50%% of annotators marked (PQ-optimal, default), "
+                              "'union' = every filament any annotator marked, 'single' = first record only")
 
 
 def _prepare_one(dataset, paths, train_ids, val_ids, fold, args):
@@ -46,20 +53,25 @@ def _prepare_one(dataset, paths, train_ids, val_ids, fold, args):
     # to get them, leaving the U-Net stage trained on real data only.
     save_split(paths.split_path_for(fold), train_ids, val_ids)
 
-    yaml_path = build_yolo_dataset(dataset, paths.train_img_dir, paths.yolo_dir_for(fold),
-                                    train_ids, val_ids, synthetic_img_dir=paths.synthetic_img_dir_for(fold))
-    print(f"  train images: {len(train_ids)}  val images: {len(val_ids)}  -> {yaml_path}")
+    common = dict(synthetic_img_dir=paths.synthetic_img_dir_for(fold), annotator_merge=args.annotator_merge)
+    yaml_path = build_yolo_dataset(dataset, paths.train_img_dir, paths.yolo_dir_for(fold), train_ids, val_ids, **common)
+    print(f"  train records: {len(train_ids)}  val records: {len(val_ids)}  "
+          f"(annotator merge: {args.annotator_merge}) -> {yaml_path}")
 
     if args.obb:
         obb_yaml_path = build_yolo_obb_dataset(dataset, paths.train_img_dir, paths.yolo_obb_dir_for(fold),
-                                                train_ids, val_ids, synthetic_img_dir=paths.synthetic_img_dir_for(fold))
+                                                train_ids, val_ids, **common)
         print(f"  OBB dataset -> {obb_yaml_path}")
 
     if args.normalize:
         norm_yaml_path = build_yolo_dataset(dataset, paths.train_img_dir, paths.yolo_norm_dir_for(fold),
-                                             train_ids, val_ids, synthetic_img_dir=paths.synthetic_img_dir_for(fold),
-                                             preprocess=True)
+                                             train_ids, val_ids, preprocess=True, **common)
         print(f"  normalized dataset -> {norm_yaml_path}")
+
+    if args.seg:
+        seg_yaml_path = build_yolo_seg_dataset(dataset, paths.train_img_dir, paths.yolo_seg_dir_for(fold),
+                                                train_ids, val_ids, **common)
+        print(f"  segmentation dataset -> {seg_yaml_path}")
 
 
 def run(args: argparse.Namespace) -> None:

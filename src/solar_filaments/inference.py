@@ -335,6 +335,78 @@ def predict_instances_obb(image_path: Path, yolo_model, unet_model, device: torc
     return label_map, instance_scores
 
 
+def coarse_label_map(candidates, H: int, W: int, min_instance_area: int = 25,
+                     mask_nms_thresh: float = 0.4) -> Tuple[np.ndarray, List[float]]:
+    """Stitch a backend's own coarse masks (no refiner) into an instance map -
+    the detector-alone view, used for checkpoint selection and ablation."""
+    label_map = np.zeros((H, W), dtype=np.uint16)
+    scores, next_id = [], 1
+    for c in sorted(candidates, key=lambda c: -c.score):
+        if c.coarse_mask is None:
+            continue
+        if _claim_candidate(label_map, c.coarse_mask, 0, 0, next_id, min_instance_area, mask_nms_thresh):
+            scores.append(c.score)
+            next_id += 1
+    return label_map, scores
+
+
+@torch.no_grad()
+def refine_candidates(img: np.ndarray, candidates, unet_model, device: torch.device,
+                      crop_size: int = 256, pad_factor: float = 1.35, min_crop_side: int = 48,
+                      mask_thresh: float = 0.5, min_instance_area: int = 25,
+                      mask_nms_thresh: float = 0.4, mask_conf_thres: float = 0.0,
+                      use_tta: bool = False, fallback_coarse: bool = False
+                      ) -> Tuple[np.ndarray, List[float]]:
+    """The shared second stage for every detector backend: crop each candidate
+    (highest score first) around its tightest known box, segment it with the
+    U-Net (optionally flip-TTA), place the mask back, and claim it via
+    mask-level NMS. With `fallback_coarse`, a candidate whose refined mask
+    comes back empty/too small but which carries a coarse mask from the
+    detector is claimed with that coarse mask instead - protects recall on
+    faint filaments the refiner is unsure about, at the cost of a coarser
+    boundary."""
+    H, W = img.shape
+    label_map = np.zeros((H, W), dtype=np.uint16)
+    scores, next_id = [], 1
+
+    for c in sorted(candidates, key=lambda c: -c.score):
+        x1b, y1b, x2b, y2b = c.tight_box()
+        cx1, cy1, cx2, cy2 = padded_rect_crop(x1b, y1b, x2b - x1b, y2b - y1b, W, H, pad_factor, min_crop_side)
+        if cx2 <= cx1 or cy2 <= cy1:
+            continue
+
+        crop = img[cy1:cy2, cx1:cx2]
+        mask_lb, prob, scale, left, top = _segment_maybe_tta(unet_model, device, crop, crop_size, mask_thresh, use_tta)
+
+        if mask_conf_thres > 0.0:
+            covered = mask_lb > 0
+            if (prob[covered].mean() if covered.any() else 0.0) < mask_conf_thres:
+                continue
+
+        candidate = undo_letterbox(mask_lb, scale, left, top, cx2 - cx1, cy2 - cy1) > 0
+        if candidate.sum() < min_instance_area and fallback_coarse and c.coarse_mask is not None:
+            candidate = c.coarse_mask[cy1:cy2, cx1:cx2]
+        if _claim_candidate(label_map, candidate, cy1, cx1, next_id, min_instance_area, mask_nms_thresh):
+            scores.append(float(c.score))
+            next_id += 1
+
+    return label_map, scores
+
+
+def predict_instances_from_candidates(image_path: Path, detector, unet_model, device: torch.device,
+                                      preprocess: bool = False, refine: bool = True, **refine_kwargs
+                                      ) -> Tuple[np.ndarray, List[float]]:
+    """Backend-agnostic entry point: detector.detect -> refine_candidates (or
+    the detector's coarse masks alone with refine=False)."""
+    img = load_image(image_path, preprocess=preprocess)
+    candidates = detector.detect(img)
+    if not refine:
+        return coarse_label_map(candidates, *img.shape,
+                                min_instance_area=refine_kwargs.get("min_instance_area", 25),
+                                mask_nms_thresh=refine_kwargs.get("mask_nms_thresh", 0.4))
+    return refine_candidates(img, candidates, unet_model, device, **refine_kwargs)
+
+
 def predict_instances_ensemble(sources: List[Tuple[Callable[[], Tuple[np.ndarray, List[float]]], float]],
                                 mask_nms_thresh: float = 0.3, min_instance_area: int = 25
                                 ) -> Tuple[np.ndarray, List[float]]:

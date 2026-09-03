@@ -84,18 +84,33 @@ filament prepare                                          # single 90/10 split, 
 filament prepare --k-folds 5 --augment-copy-paste 300      # 5-fold + synthetic copy-paste augmentation
 filament prepare --obb                                     # also build the OBB-label dataset
 filament prepare --normalize                                # also build the limb-darkening+CLAHE dataset
+filament prepare --seg                                      # also build the YOLO-seg polygon dataset
+filament prepare --annotator-merge majority                 # consensus rule for multi-annotator images (default)
 ```
+
+MAGFiLO images can carry 1-3 independent annotator records, and they disagree
+a lot (only ~44% of one annotator's filaments are matched by every other
+annotator of the same image). `--annotator-merge` turns those records into one
+detector target set per physical image: `majority` (filaments >= 50% of the
+annotators marked - the PQ-optimal set, since PQ is pooled over every
+annotator record), `union`, or `single` (one record, the legacy behavior).
 
 ### 2. Train the detector
 
 ```bash
-filament train-yolo --epochs 60 --imgsz 1024               # axis-aligned
+filament train-yolo --epochs 60 --imgsz 1024               # axis-aligned boxes (original pipeline)
+filament train-yolo --seg --epochs 60                       # YOLO11 instance segmentation (needs `prepare --seg`)
+filament train-maskrcnn --epochs 20                         # torchvision Mask R-CNN (COCO-pretrained, ~170 MB download on first use)
 filament train-yolo --obb --epochs 60                       # oriented boxes (needs `prepare --obb` first)
 filament train-yolo --normalize --epochs 60                 # normalized images (needs `prepare --normalize` first)
-filament train-yolo --fold 0 --epochs 60                    # a single k-fold fold
+filament train-yolo --fold 0 --epochs 60                    # a single k-fold fold (also for train-maskrcnn)
 # resume an interrupted run:
 filament train-yolo --resume --weights work/runs/yolo11s_filament_detect/weights/last.pt
 ```
+
+All three detectors feed the same crop-level U-Net refiner, mask-level NMS and
+flip-TTA (`src/solar_filaments/detectors/` + `inference.refine_candidates`);
+pick one at evaluate/predict time with `--detector {yolo,yolo-seg,maskrcnn}`.
 
 ### 3. Train the U-Net refiner
 
@@ -115,11 +130,19 @@ filament evaluate --obb --full                                # OBB
 filament evaluate --classical --full                          # non-learned baseline, no GPU
 filament evaluate --ensemble --full                            # axis-aligned + OBB (+ classical) merge
 filament evaluate --fold all --full                            # pool out-of-fold PQ across every k-fold split
+filament evaluate --detector maskrcnn --score-thres 0.6 --full # Mask R-CNN backend + U-Net refiner
+filament evaluate --detector yolo-seg --full                    # YOLO-seg backend + U-Net refiner
+filament evaluate --detector maskrcnn --no-refine --full        # ablation: the detector's own masks, no refiner
 ```
 
-Every model variant needs its own `--conf-thres` sweep before its PQ is
-trustworthy — a threshold tuned for one configuration does not transfer to
-another. See the report for the sweeps behind every number in the table above.
+Every line prints PQ with its decomposition (`SQ x RQ`, TP/FP/FN, GT miss
+rate, prediction FP rate, fragmentation and over-merge rates) so recall and
+precision problems are visible separately. Every model variant needs its own
+`--conf-thres` (or `--score-thres`) sweep before its PQ is trustworthy — a
+threshold tuned for one configuration does not transfer to another — and the
+number to trust is the **out-of-fold PQ over all 707 images**
+(`--fold all`), not the single 70-image split: the first public-leaderboard
+submission scored 0.36 PQ against a single-split local 0.44.
 
 ### 5. Generate the test-set submission
 

@@ -13,7 +13,9 @@ def add_args(parser: argparse.ArgumentParser) -> None:
                               f"default: {cfg.base_weights}, or yolo11s-obb.pt with --obb")
     parser.add_argument("--imgsz", type=int, default=cfg.imgsz)
     parser.add_argument("--epochs", type=int, default=cfg.epochs)
-    parser.add_argument("--batch", type=int, default=cfg.batch)
+    parser.add_argument("--batch", type=int, default=cfg.batch,
+                         help="images per step; 0 = ultralytics AutoBatch (sizes the batch to ~60%% of the GPU "
+                              "memory free when the run starts)")
     parser.add_argument("--patience", type=int, default=cfg.patience)
     parser.add_argument("--name", default=None, help=f"default: {cfg.name}, or {cfg.name}_fold<N> with --fold")
     parser.add_argument("--resume", action="store_true", help="resume an interrupted run (weights must be its last.pt)")
@@ -28,6 +30,10 @@ def add_args(parser: argparse.ArgumentParser) -> None:
                          help="train on the limb-darkening-flattened + CLAHE-preprocessed dataset "
                               "(from `filament prepare --normalize`) instead of raw images - "
                               "not combinable with --obb this round")
+    parser.add_argument("--seg", action="store_true",
+                         help="train a YOLO11 instance-segmentation model (yolo11s-seg.pt, downloaded by "
+                              "ultralytics on first use) on the polygon dataset from `filament prepare --seg`; "
+                              "run name <name>_seg. Pair with `--detector yolo-seg` at evaluate/predict time")
 
 
 def run(args: argparse.Namespace) -> None:
@@ -35,26 +41,29 @@ def run(args: argparse.Namespace) -> None:
     paths.ensure()
     cfg = YoloConfig()
 
-    if args.obb and args.normalize:
-        raise ValueError("--obb and --normalize can't be combined this round")
+    if sum([args.obb, args.normalize, args.seg]) > 1:
+        raise ValueError("--obb, --normalize and --seg are mutually exclusive")
 
     device = args.device
     if device is None:
         device = 0 if torch.cuda.is_available() else "cpu"
 
-    base_name = f"{cfg.name}_obb" if args.obb else (f"{cfg.name}_norm" if args.normalize else cfg.name)
+    variant = "_obb" if args.obb else ("_norm" if args.normalize else ("_seg" if args.seg else ""))
+    base_name = f"{cfg.name}{variant}"
     name = args.name or (f"{base_name}_fold{args.fold}" if args.fold is not None else base_name)
-    weights = args.weights or ("yolo11s-obb.pt" if args.obb else cfg.base_weights)
+    weights = args.weights or ("yolo11s-obb.pt" if args.obb else ("yolo11s-seg.pt" if args.seg else cfg.base_weights))
 
     if args.obb:
         yolo_dir = paths.yolo_obb_dir_for(args.fold)
     elif args.normalize:
         yolo_dir = paths.yolo_norm_dir_for(args.fold)
+    elif args.seg:
+        yolo_dir = paths.yolo_seg_dir_for(args.fold)
     else:
         yolo_dir = paths.yolo_dir_for(args.fold)
     data_yaml = yolo_dir / "data.yaml"
     if not data_yaml.exists():
-        hint = " --obb" if args.obb else (" --normalize" if args.normalize else "")
+        hint = " --obb" if args.obb else (" --normalize" if args.normalize else (" --seg" if args.seg else ""))
         fold_hint = f" --k-folds ..." if args.fold is not None else ""
         raise FileNotFoundError(f"{data_yaml} not found - run `filament prepare{hint}{fold_hint}` first")
 
@@ -68,7 +77,7 @@ def run(args: argparse.Namespace) -> None:
         data=str(data_yaml),
         imgsz=args.imgsz,
         epochs=args.epochs,
-        batch=args.batch,
+        batch=args.batch if args.batch > 0 else -1,  # -1 = AutoBatch
         device=device,
         optimizer="AdamW",
         lr0=1e-3,

@@ -49,6 +49,10 @@ class Paths:
         return self.work_dir / "yolo_norm_dataset"
 
     @property
+    def yolo_seg_dir(self) -> Path:
+        return self.work_dir / "yolo_seg_dataset"
+
+    @property
     def ckpt_dir(self) -> Path:
         return self.work_dir / "checkpoints"
 
@@ -83,6 +87,9 @@ class Paths:
 
     def yolo_norm_dir_for(self, fold: Optional[int]) -> Path:
         return self.yolo_norm_dir if fold is None else self.yolo_norm_dir / f"fold{fold}"
+
+    def yolo_seg_dir_for(self, fold: Optional[int]) -> Path:
+        return self.yolo_seg_dir if fold is None else self.yolo_seg_dir / f"fold{fold}"
 
     def synthetic_img_dir_for(self, fold: Optional[int]) -> Path:
         return self.synthetic_img_dir if fold is None else self.synthetic_img_dir / f"fold{fold}"
@@ -121,6 +128,19 @@ class YoloConfig:
 
 
 @dataclass
+class MaskRCNNConfig:
+    imgsz: int = 1024
+    epochs: int = 20
+    batch: int = 2
+    lr: float = 1e-4
+    num_workers: int = 4
+    val_subset: int = 32          # images scored (coarse-mask PQ) each epoch for checkpoint selection
+    score_thres: float = 0.5      # inference score cut - re-sweep per model, like conf_thres for YOLO
+    aspect_ratios: tuple = (0.25, 0.5, 1.0, 2.0, 4.0)
+    anchor_sizes: tuple = (16, 32, 64, 128, 256)
+
+
+@dataclass
 class UNetConfig:
     base_channels: int = 32
     use_edge_attention: bool = True
@@ -155,3 +175,5 @@ class InferenceConfig:
 
 SEED = 42
 IMAGE_SIZE = 2048  # fixed native resolution for every MAGFiLO image
+# how 1-3 annotator records per image become one detector target set (see data/coco.py::merge_annotator_records)
+ANNOTATOR_MERGE_DEFAULT = "majority"

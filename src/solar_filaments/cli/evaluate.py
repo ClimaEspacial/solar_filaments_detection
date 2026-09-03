@@ -10,10 +10,18 @@ import torch
 from ultralytics import YOLO
 
 from solar_filaments.classical import detect_filaments_classical
+from solar_filaments.cli._backends import add_backend_args, build_detector, make_predict_fn
 from solar_filaments.config import CropConfig, InferenceConfig, Paths, UNetConfig, YoloConfig
 from solar_filaments.data.coco import Dataset, load_image, load_split
 from solar_filaments.eval.self_eval import build_val_gt_pred_dataframes, build_val_gt_pred_dataframes_classical, \
-    build_val_gt_pred_dataframes_ensemble, get_overlap_df, get_pq_score, plot_distribution, plot_m2n_counts
+    build_val_gt_pred_dataframes_ensemble, format_summary, get_overlap_df, plot_distribution, plot_m2n_counts, \
+    summarize_overlap
+
+
+def _score(overlap_df: pd.DataFrame, label: str) -> float:
+    summary = summarize_overlap(overlap_df)
+    print(f"[{label}] {format_summary(summary)}")
+    return summary["PQ"]
 from solar_filaments.inference import predict_instances, predict_instances_obb
 from solar_filaments.models.unet import EdgeAttUNet
 
@@ -49,6 +57,7 @@ def add_args(parser: argparse.ArgumentParser) -> None:
                          help="average the U-Net's prediction over 4 flips (identity/h/v/hv), only trusting the "
                               "average when it doesn't change the single-view mask's topology (area/Dice/"
                               "component-count guards) - inference-only, no retraining, no separate weights")
+    add_backend_args(parser)
     parser.add_argument("--fold", default=None,
                          help="evaluate this fold (int, from `filament prepare --k-folds`), or 'all' to pool "
                               "out-of-fold PQ across every fold's own held-out val set")
@@ -95,14 +104,27 @@ def _default_weights(paths: Paths, args: argparse.Namespace, fold):
     return yolo_weights, unet_weights
 
 
-def _load_models(paths: Paths, args: argparse.Namespace, device, fold):
-    yolo_weights, unet_weights = _default_weights(paths, args, fold)
-    yolo_model = YOLO(yolo_weights)
+def _load_unet(paths: Paths, args: argparse.Namespace, device, fold):
+    _, unet_weights = _default_weights(paths, args, fold)
     norm_layer = "instance" if args.instance_norm else "batch"
     unet_model = EdgeAttUNet(use_edge_attention=UNetConfig().use_edge_attention, norm_layer=norm_layer).to(device)
     unet_model.load_state_dict(torch.load(unet_weights, map_location=device))
     unet_model.eval()
-    return yolo_model, unet_model
+    return unet_model
+
+
+def _load_models(paths: Paths, args: argparse.Namespace, device, fold):
+    yolo_weights, _ = _default_weights(paths, args, fold)
+    return YOLO(yolo_weights), _load_unet(paths, args, device, fold)
+
+
+def _backend_predict_fn(paths: Paths, args: argparse.Namespace, device, fold, crop_cfg, inference_cfg):
+    """For --detector yolo-seg / maskrcnn: a predict_fn for build_val_gt_pred_dataframes.
+    The refiner is the same axis-aligned U-Net checkpoint (crop-level, detector-agnostic)."""
+    detector = build_detector(args, paths, device, fold, inference_cfg)
+    unet_model = None if args.no_refine else _load_unet(paths, args, device, fold)
+    return make_predict_fn(args, detector, unet_model, device, crop_cfg, inference_cfg,
+                           preprocess=args.normalize, use_tta=args.tta)
 
 
 def _save_plots(paths: Paths, overlap_df: pd.DataFrame) -> None:
@@ -135,11 +157,16 @@ def _run_all_folds(paths: Paths, args: argparse.Namespace, dataset, device, crop
 
     all_gt, all_pred = [], []
     for fold in range(k):
-        yolo_model, unet_model = _load_models(paths, args, device, fold)
         _, val_ids = load_split(paths.split_path_for(fold))
+        if args.detector == "yolo":
+            yolo_model, unet_model = _load_models(paths, args, device, fold)
+            predict_fn = None
+        else:
+            yolo_model = unet_model = None
+            predict_fn = _backend_predict_fn(paths, args, device, fold, crop_cfg, inference_cfg)
         gt_df, pred_df = build_val_gt_pred_dataframes(
             dataset, paths.train_img_dir, sorted(val_ids), yolo_model, unet_model, device, crop_cfg, inference_cfg,
-            obb=args.obb, preprocess=args.normalize, use_tta=args.tta)
+            obb=args.obb, preprocess=args.normalize, use_tta=args.tta, predict_fn=predict_fn)
         print(f"[fold {fold}] GT filaments: {len(gt_df)}   predicted filaments: {len(pred_df)}")
         all_gt.append(gt_df)
         all_pred.append(pred_df)
@@ -148,8 +175,7 @@ def _run_all_folds(paths: Paths, args: argparse.Namespace, dataset, device, crop
     pred_df = pd.concat(all_pred, ignore_index=True)
     print(f"[all {k} folds, pooled] GT filaments: {len(gt_df)}   predicted filaments: {len(pred_df)}")
     overlap_df = get_overlap_df(gt_df, pred_df)
-    pq_score = get_pq_score(overlap_df)
-    print(f"[all {k} folds, pooled] out-of-fold PQ score: {pq_score:.4f}")
+    _score(overlap_df, f"all {k} folds, pooled, out-of-fold")
 
     if args.full:
         _save_plots(paths, overlap_df)
@@ -171,9 +197,7 @@ def _run_classical(paths: Paths, args: argparse.Namespace, dataset: Dataset) -> 
         gt_df, pred_df = build_val_gt_pred_dataframes_classical(dataset, paths.train_img_dir, ids, classical_kwargs)
         print(f"[{label}] GT filaments: {len(gt_df)}   predicted filaments: {len(pred_df)}")
         overlap_df = get_overlap_df(gt_df, pred_df)
-        pq_score = get_pq_score(overlap_df)
-        print(f"[{label}] PQ score: {pq_score:.4f}")
-        return overlap_df, pq_score
+        return overlap_df, _score(overlap_df, label)
 
     if args.quick > 0:
         quick_ids = random.sample(image_ids, k=min(args.quick, len(image_ids)))
@@ -237,9 +261,7 @@ def _run_ensemble(paths: Paths, args: argparse.Namespace, dataset: Dataset, devi
             dataset, paths.train_img_dir, ids, make_sources, ensemble_kwargs)
         print(f"[{label}] GT filaments: {len(gt_df)}   predicted filaments: {len(pred_df)}")
         overlap_df = get_overlap_df(gt_df, pred_df)
-        pq_score = get_pq_score(overlap_df)
-        print(f"[{label}] PQ score: {pq_score:.4f}")
-        return overlap_df, pq_score
+        return overlap_df, _score(overlap_df, label)
 
     if args.quick > 0:
         quick_ids = random.sample(val_ids, k=min(args.quick, len(val_ids)))
@@ -276,18 +298,21 @@ def run(args: argparse.Namespace) -> None:
         return
 
     fold = int(args.fold) if args.fold is not None else None
-    yolo_model, unet_model = _load_models(paths, args, device, fold)
+    if args.detector == "yolo":
+        yolo_model, unet_model = _load_models(paths, args, device, fold)
+        predict_fn = None
+    else:
+        yolo_model = unet_model = None
+        predict_fn = _backend_predict_fn(paths, args, device, fold, crop_cfg, inference_cfg)
     _, val_ids = load_split(paths.split_path_for(fold))
 
     def run_self_eval(image_ids, label):
         gt_df, pred_df = build_val_gt_pred_dataframes(
             dataset, paths.train_img_dir, image_ids, yolo_model, unet_model, device, crop_cfg, inference_cfg,
-            obb=args.obb, preprocess=args.normalize, use_tta=args.tta)
+            obb=args.obb, preprocess=args.normalize, use_tta=args.tta, predict_fn=predict_fn)
         print(f"[{label}] GT filaments: {len(gt_df)}   predicted filaments: {len(pred_df)}")
         overlap_df = get_overlap_df(gt_df, pred_df)
-        pq_score = get_pq_score(overlap_df)
-        print(f"[{label}] PQ score: {pq_score:.4f}")
-        return overlap_df, pq_score
+        return overlap_df, _score(overlap_df, label)
 
     if args.quick > 0:
         quick_ids = random.sample(sorted(val_ids), k=min(args.quick, len(val_ids)))
