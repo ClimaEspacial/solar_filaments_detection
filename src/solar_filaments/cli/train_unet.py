@@ -92,6 +92,10 @@ def run(args: argparse.Namespace) -> None:
     if args.fold is not None:
         ckpt_name = ckpt_name.replace("_best.pt", f"_fold{args.fold}_best.pt")
     ckpt_path = paths.ckpt_dir / ckpt_name
+    has_val = len(val_crop_ds) > 0
+    if not has_val:
+        print("no validation crops (val-frac 0 / final all-data training) - "
+              "saving every epoch instead of selecting on val_dice")
     best_val_dice = 0.0
     for epoch in range(args.epochs):
         model.train()
@@ -108,21 +112,27 @@ def run(args: argparse.Namespace) -> None:
             running_loss += loss.item() * crops.size(0)
         sched.step()
 
-        model.eval()
-        val_dice, n = 0.0, 0
-        with torch.no_grad():
-            for crops, masks in val_loader:
-                crops, masks = crops.to(device), masks.to(device)
-                logits = model(crops)
-                val_dice += dice_score(logits, masks) * crops.size(0)
-                n += crops.size(0)
-        val_dice /= max(n, 1)
-
-        print(f"epoch {epoch+1:03d}/{args.epochs}  "
-              f"train_loss={running_loss/len(train_loader.dataset):.4f}  val_dice={val_dice:.4f}")
-
-        if val_dice > best_val_dice:
-            best_val_dice = val_dice
+        if has_val:
+            model.eval()
+            val_dice, n = 0.0, 0
+            with torch.no_grad():
+                for crops, masks in val_loader:
+                    crops, masks = crops.to(device), masks.to(device)
+                    logits = model(crops)
+                    val_dice += dice_score(logits, masks) * crops.size(0)
+                    n += crops.size(0)
+            val_dice /= max(n, 1)
+            print(f"epoch {epoch+1:03d}/{args.epochs}  "
+                  f"train_loss={running_loss/len(train_loader.dataset):.4f}  val_dice={val_dice:.4f}")
+            if val_dice > best_val_dice:
+                best_val_dice = val_dice
+                torch.save(model.state_dict(), ckpt_path)
+        else:
+            # nothing to select "best" on - just keep the latest epoch's weights
+            print(f"epoch {epoch+1:03d}/{args.epochs}  train_loss={running_loss/len(train_loader.dataset):.4f}")
             torch.save(model.state_dict(), ckpt_path)
 
-    print("best val dice:", best_val_dice, "-> saved to", ckpt_path)
+    if has_val:
+        print("best val dice:", best_val_dice, "-> saved to", ckpt_path)
+    else:
+        print("final epoch weights (no val set) -> saved to", ckpt_path)

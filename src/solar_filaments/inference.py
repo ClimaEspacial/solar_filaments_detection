@@ -158,9 +158,14 @@ def predict_instances(image_path: Path, yolo_model, unet_model, device: torch.de
                        mask_thresh: float = 0.5, min_instance_area: int = 25,
                        mask_nms_thresh: float = 0.4, mask_conf_thres: float = 0.0,
                        use_spine_orientation: bool = False, min_elongation: float = 1.5,
-                       preprocess: bool = False, use_tta: bool = False
+                       preprocess: bool = False, use_tta: bool = False,
+                       segmenter=None, semantic_thres: float = 0.0
                        ) -> Tuple[np.ndarray, List[float]]:
     img = load_image(image_path, preprocess=preprocess)
+    # Independent "is there a filament here" opinion from the full-disk branch,
+    # used to keep or drop the detector's low-confidence proposals. Computed once
+    # per image (one small forward pass), not per candidate.
+    semantic_prob = segmenter.probability_map(img) if (segmenter is not None and semantic_thres > 0.0) else None
     H, W = img.shape
 
     det = yolo_model.predict(img, conf=conf_thres, iou=iou_thres, imgsz=imgsz, verbose=False)[0]
@@ -193,6 +198,10 @@ def predict_instances(image_path: Path, yolo_model, unet_model, device: torch.de
                 continue
 
         rough_mask = undo_letterbox(mask_letterboxed, scale, left, top, cx2 - cx1, cy2 - cy1)
+
+        if semantic_prob is not None:
+            if semantic_score(semantic_prob, rough_mask > 0, cy1, cx1) < semantic_thres:
+                continue
 
         # Decide whether to trust an estimated orientation for this candidate:
         # a rough mask that's too small or too round gives a PCA angle that's

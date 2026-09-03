@@ -141,6 +141,18 @@ class MaskRCNNConfig:
 
 
 @dataclass
+class FullDiskConfig:
+    """Flat U-Net full-disk semantic branch (models/flat_unet.py)."""
+    imgsz: int = 512          # the paper's resolution; filaments are thin, so 1024 is worth sweeping
+    width: int = 32           # constant channel width -> ~0.26M params
+    epochs: int = 60
+    batch_size: int = 8
+    lr: float = 1e-3
+    num_workers: int = 4
+    bce_weight: float = 0.5   # filaments are ~1% of full-disk pixels; don't let BCE dominate Dice
+
+
+@dataclass
 class UNetConfig:
     base_channels: int = 32
     use_edge_attention: bool = True
@@ -152,10 +164,29 @@ class UNetConfig:
 
 @dataclass
 class InferenceConfig:
-    conf_thres: float = 0.35  # tuned on val: 0.15->PQ 0.394, 0.25->0.410, 0.35->0.419 (peak), 0.45->0.418
+    # Local validation and the real Kaggle board disagree on this, unresolved as of 2026-09-03:
+    # - single 70-image split: 0.35 best (0.394/0.410/0.419/0.418 at .15/.25/.35/.45)
+    # - 5-fold OOF (707 images, majority-consensus targets): 0.15 best by a lot (OOF PQ
+    #   .15->0.4383, .25->0.4227, .35->0.3604)
+    # - real leaderboard: 6 submissions, conf~0.35 scored 0.36 three times, conf~0.15 scored
+    #   0.34 three times, across two different model generations - i.e. the board agrees with
+    #   the single-split number and disagrees with the OOF number. Working hypothesis: the
+    #   "majority" annotator-merge training target (see data/coco.py) is what breaks the OOF
+    #   estimate's transferability, not OOF cross-validation in general - unconfirmed. Until
+    #   this is root-caused, trust real submissions over either local number; see project
+    #   memory "solar-filaments-restructure" before changing this value.
+    conf_thres: float = 0.35
     iou_thres: float = 0.5
     imgsz: int = 1024
-    mask_thresh: float = 0.5
+    # Probability cut turning the U-Net's output into a binary mask. Never swept until
+    # 2026-09-03, when the predicted masks turned out to be 1.14-1.45x the area of the
+    # pycocotools-rasterized GT at the old 0.5 default. Swept on fold0 val against
+    # pycocotools GT (the competition standard, see data/coco.py::polygon_to_mask):
+    # 0.5->PQ 0.3782, 0.6->0.3912, 0.7->0.3993, 0.8->0.4038 (peak), 0.9->0.4032 at
+    # conf=0.35; same 0.8 peak at conf=0.15 (0.3995/0.4129/0.4208/0.4234/0.4192). At 0.8 the
+    # predicted/GT area ratio is ~1.01, i.e. the optimum is exactly where mask size matches
+    # the GT. Independent corroboration: the public "LB 0.70" notebook used 0.70 here.
+    mask_thresh: float = 0.8
     min_instance_area: int = 25
     # suppress a candidate mask covered this much by a higher-confidence instance.
     # tuned on val (at conf_thres=0.35): 0.6->PQ 0.430, 0.4->0.433, 0.25->0.438 (plateau;

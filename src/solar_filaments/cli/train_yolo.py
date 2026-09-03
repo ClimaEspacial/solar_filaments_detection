@@ -89,6 +89,9 @@ def run(args: argparse.Namespace) -> None:
         hsv_h=0.0, hsv_s=0.0, hsv_v=0.1,
         project=str(paths.runs_dir),
         name=name,
+        exist_ok=True,  # overwrite work/runs/<name> in place - ultralytics otherwise silently
+                        # auto-increments to <name>2, <name>3, ... on a rerun, which desyncs
+                        # from the deterministic path evaluate/predict resolve the weights from
     )
     weights_path = paths.runs_dir / name / "weights" / "best.pt"
     print("best weights:", weights_path)

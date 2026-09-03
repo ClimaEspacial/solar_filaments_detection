@@ -20,6 +20,9 @@ def add_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--imgsz", type=int, default=InferenceConfig().imgsz)
     parser.add_argument("--mask-nms-thresh", type=float, default=InferenceConfig().mask_nms_thresh,
                          help="suppress a candidate mask this fraction covered by a higher-confidence instance")
+    parser.add_argument("--mask-thresh", type=float, default=InferenceConfig().mask_thresh,
+                         help="U-Net probability cut for the binary mask; higher = thinner masks "
+                              "(swept 2026-09-03: 0.8 peaks against pycocotools-rasterized GT)")
     parser.add_argument("--mask-conf-thres", type=float, default=InferenceConfig().mask_conf_thres,
                          help="min mean U-Net probability inside a candidate's own mask; 0 disables")
     parser.add_argument("--spine-orientation", action="store_true",
@@ -74,7 +77,7 @@ def run(args: argparse.Namespace) -> None:
     crop_cfg = CropConfig(use_spine_orientation=args.spine_orientation, use_obb_orientation=args.obb)
     inference_cfg = InferenceConfig(conf_thres=args.conf_thres, iou_thres=args.iou_thres, imgsz=args.imgsz,
                                      mask_nms_thresh=args.mask_nms_thresh, mask_conf_thres=args.mask_conf_thres,
-                                     min_elongation=args.min_elongation)
+                                     mask_thresh=args.mask_thresh, min_elongation=args.min_elongation)
 
     if args.detector == "yolo":
         yolo_model = YOLO(yolo_weights)
