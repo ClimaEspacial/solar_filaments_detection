@@ -59,6 +59,9 @@ pip install -r requirements.txt
 pip install -e . --no-deps
 ```
 
+To run [`notebooks/pipeline_walkthrough.ipynb`](notebooks/pipeline_walkthrough.ipynb)
+interactively, also install the notebook extras: `pip install -e .[notebook]`.
+
 Paths are environment-variable overridable (see [`src/solar_filaments/config.py`](src/solar_filaments/config.py)):
 
 - `FILAMENT_DATA_ROOT` — defaults to `/data/marchezi/filament_segmentation_2026/MAGFiLO_1.0_Kaggle_2026`

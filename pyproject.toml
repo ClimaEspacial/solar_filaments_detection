@@ -17,6 +17,9 @@ dependencies = [
     "scipy",
 ]
 
+[project.optional-dependencies]
+notebook = ["jupyter", "ipykernel", "nbconvert"]
+
 [project.scripts]
 filament = "solar_filaments.cli.main:main"
 
