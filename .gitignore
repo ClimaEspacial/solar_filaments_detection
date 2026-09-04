@@ -4,6 +4,11 @@
 *.pth
 kaggle.json
 
+/bibliography/
+/paper/
+/kaggle_comp_report_fi_segm_Marchezi_2026/
+*.zip
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
