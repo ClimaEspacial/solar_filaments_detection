@@ -30,7 +30,7 @@ an unreliable angle estimate, so those candidates fall back to the plain
 axis-aligned mask instead of compounding noise through a bad rotation.
 """
 from pathlib import Path
-from typing import Callable, List, Tuple
+from typing import Callable, List, Tuple, Optional
 
 import cv2
 import numpy as np
@@ -40,6 +40,7 @@ from ultralytics.utils.ops import xyxyxyxy2xywhr
 from solar_filaments.data.coco import load_image
 from solar_filaments.data.crop_dataset import letterbox_resize, padded_rect_crop, undo_letterbox
 from solar_filaments.detectors.fulldisk import semantic_score
+from solar_filaments.rescore import DiskGeometry, candidate_features
 from solar_filaments.data.oriented_crop import (apply_affine_points, clip_patch_to_image,
                                                  crop_patch_with_padding, patch_half_size,
                                                  pca_angle_and_elongation, rotation_matrix)
@@ -160,21 +161,43 @@ def predict_instances(image_path: Path, yolo_model, unet_model, device: torch.de
                        mask_nms_thresh: float = 0.4, mask_conf_thres: float = 0.0,
                        use_spine_orientation: bool = False, min_elongation: float = 1.5,
                        preprocess: bool = False, use_tta: bool = False,
-                       segmenter=None, semantic_thres: float = 0.0
+                       segmenter=None, semantic_thres: float = 0.0,
+                       semantic_candidates: float = 0.0, rescorer=None
                        ) -> Tuple[np.ndarray, List[float]]:
     img = load_image(image_path, preprocess=preprocess)
     # Independent "is there a filament here" opinion from the full-disk branch,
     # used to keep or drop the detector's low-confidence proposals. Computed once
     # per image (one small forward pass), not per candidate.
-    semantic_prob = segmenter.probability_map(img) if (segmenter is not None and semantic_thres > 0.0) else None
+    need_prob = segmenter is not None and (semantic_thres > 0.0 or semantic_candidates > 0.0
+                                            or rescorer is not None)
+    semantic_prob = segmenter.probability_map(img) if need_prob else None
+    # disk geometry is per-image and reused by every candidate's descriptors
+    geom = DiskGeometry.from_image(img) if rescorer is not None else None
     H, W = img.shape
 
     det = yolo_model.predict(img, conf=conf_thres, iou=iou_thres, imgsz=imgsz, verbose=False)[0]
     if det.boxes is None or len(det.boxes) == 0:
-        return np.zeros((H, W), dtype=np.uint16), []
+        boxes = np.zeros((0, 4), dtype=np.float32)
+        scores = np.zeros((0,), dtype=np.float32)
+    else:
+        boxes = det.boxes.xyxy.cpu().numpy()
+        scores = det.boxes.conf.cpu().numpy()
 
-    boxes = det.boxes.xyxy.cpu().numpy()
-    scores = det.boxes.conf.cpu().numpy()
+    if semantic_candidates > 0.0 and segmenter is not None:
+        # Add proposals the box detector never made. Measured motivation: 62% of the
+        # ground-truth filaments this pipeline misses still carry mean full-disk
+        # semantic probability above 0.5, i.e. the segmenter sees them even when the
+        # detector does not. Their scores are rescaled by `semantic_candidates` so they
+        # rank below (or above) YOLO's own proposals in the greedy claiming order, and
+        # they are then cropped/refined/claimed by exactly the same code path.
+        extra = segmenter.detect(img)
+        if extra:
+            boxes = np.concatenate([boxes, np.stack([c.box_xyxy for c in extra])], axis=0)
+            scores = np.concatenate([scores, np.array([c.score * semantic_candidates for c in extra],
+                                                      dtype=np.float32)], axis=0)
+
+    if len(boxes) == 0:
+        return np.zeros((H, W), dtype=np.uint16), []
     order = np.argsort(-scores)
 
     label_map = np.zeros((H, W), dtype=np.uint16)
@@ -200,8 +223,17 @@ def predict_instances(image_path: Path, yolo_model, unet_model, device: torch.de
 
         rough_mask = undo_letterbox(mask_letterboxed, scale, left, top, cx2 - cx1, cy2 - cy1)
 
-        if semantic_prob is not None:
+        if semantic_prob is not None and semantic_thres > 0.0:
             if semantic_score(semantic_prob, rough_mask > 0, cy1, cx1) < semantic_thres:
+                continue
+
+        if rescorer is not None:
+            # Predicted annotator support: how many experts would have marked this? Kept only
+            # above the break-even derived in rescore.py. Features are computed on the crop
+            # window, hence the (cy1, cx1) offset.
+            f = candidate_features(img, rough_mask > 0, float(scores[idx]), geom,
+                                   semantic_prob, y0=cy1, x0=cx1)
+            if rescorer.predict_support([f])[0] < rescorer.threshold:
                 continue
 
         # Decide whether to trust an estimated orientation for this candidate:
@@ -365,7 +397,8 @@ def refine_candidates(img: np.ndarray, candidates, unet_model, device: torch.dev
                       crop_size: int = 256, pad_factor: float = 1.35, min_crop_side: int = 48,
                       mask_thresh: float = 0.5, min_instance_area: int = 25,
                       mask_nms_thresh: float = 0.4, mask_conf_thres: float = 0.0,
-                      use_tta: bool = False, fallback_coarse: bool = False
+                      use_tta: bool = False, fallback_coarse: bool = False,
+                      rescorer=None, semantic_prob: Optional[np.ndarray] = None
                       ) -> Tuple[np.ndarray, List[float]]:
     """The shared second stage for every detector backend: crop each candidate
     (highest score first) around its tightest known box, segment it with the
@@ -378,6 +411,7 @@ def refine_candidates(img: np.ndarray, candidates, unet_model, device: torch.dev
     H, W = img.shape
     label_map = np.zeros((H, W), dtype=np.uint16)
     scores, next_id = [], 1
+    geom = DiskGeometry.from_image(img) if rescorer is not None else None
 
     for c in sorted(candidates, key=lambda c: -c.score):
         x1b, y1b, x2b, y2b = c.tight_box()
@@ -396,6 +430,16 @@ def refine_candidates(img: np.ndarray, candidates, unet_model, device: torch.dev
         candidate = undo_letterbox(mask_lb, scale, left, top, cx2 - cx1, cy2 - cy1) > 0
         if candidate.sum() < min_instance_area and fallback_coarse and c.coarse_mask is not None:
             candidate = c.coarse_mask[cy1:cy2, cx1:cx2]
+
+        if rescorer is not None and candidate.any():
+            # Same gate as predict_instances: predicted annotator support, computed on the
+            # crop window. Applied here so every detector backend gets it - without this the
+            # `--rescorer-thres` flag was a silent no-op for --detector yolo-seg/maskrcnn.
+            f = candidate_features(img, candidate, float(c.score), geom, semantic_prob,
+                                   y0=cy1, x0=cx1)
+            if rescorer.predict_support([f])[0] < rescorer.threshold:
+                continue
+
         if _claim_candidate(label_map, candidate, cy1, cx1, next_id, min_instance_area, mask_nms_thresh):
             scores.append(float(c.score))
             next_id += 1

@@ -7,7 +7,7 @@ from solar_filaments.config import CropConfig, Paths, UNetConfig
 from solar_filaments.data.coco import Dataset, load_split
 from solar_filaments.data.crop_dataset import FilamentCropDataset
 from solar_filaments.losses import bce_dice_loss, dice_score
-from solar_filaments.models.unet import EdgeAttUNet
+from solar_filaments.models.refiner import ENCODERS, build_refiner
 
 
 def add_args(parser: argparse.ArgumentParser) -> None:
@@ -15,9 +15,17 @@ def add_args(parser: argparse.ArgumentParser) -> None:
     crop_cfg = CropConfig()
     parser.add_argument("--epochs", type=int, default=cfg.epochs)
     parser.add_argument("--batch-size", type=int, default=cfg.batch_size)
-    parser.add_argument("--lr", type=float, default=cfg.lr)
+    parser.add_argument("--lr", type=float, default=None,
+                         help=f"default {cfg.lr} for the scratch encoder, 2e-4 for --encoder resnet18 "
+                              "(fine-tuning ImageNet weights at 1e-3 diverges to nan within 3 epochs)")
     parser.add_argument("--base-channels", type=int, default=cfg.base_channels)
     parser.add_argument("--no-edge-attention", action="store_true")
+    parser.add_argument("--encoder", choices=ENCODERS, default="base",
+                         help="'base' = the scratch EdgeAttUNet encoder (8.8M params, default); "
+                              "'resnet18' = ImageNet-pretrained ResNet18 encoder (15.4M), aimed at the "
+                              "IoU 0.40-0.50 near-miss band that mask quality decides. Saves to a "
+                              "_r18-suffixed checkpoint; no flag needed at inference (the encoder is "
+                              "read back from the checkpoint)")
     parser.add_argument("--crop-size", type=int, default=crop_cfg.crop_size)
     parser.add_argument("--num-workers", type=int, default=cfg.num_workers)
     parser.add_argument("--spine-orientation", action="store_true",
@@ -74,12 +82,14 @@ def run(args: argparse.Namespace) -> None:
                              num_workers=args.num_workers, pin_memory=True)
 
     norm_layer = "instance" if args.instance_norm else "batch"
-    model = EdgeAttUNet(base=args.base_channels, use_edge_attention=not args.no_edge_attention,
-                         norm_layer=norm_layer).to(device)
+    model = build_refiner(args.encoder, use_edge_attention=not args.no_edge_attention,
+                           norm_layer=norm_layer, base_channels=args.base_channels).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"U-Net parameters: {n_params / 1e6:.2f}M")
 
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    lr = args.lr if args.lr is not None else (2e-4 if args.encoder != "base" else UNetConfig().lr)
+    print(f"encoder={args.encoder}  lr={lr}")
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
     scaler = torch.amp.GradScaler(device.type, enabled=device.type == "cuda")
 
@@ -88,6 +98,8 @@ def run(args: argparse.Namespace) -> None:
         ckpt_stem += "_norm"
     if args.instance_norm:
         ckpt_stem += "_in"
+    if args.encoder != "base":
+        ckpt_stem += f"_{args.encoder.replace('resnet', 'r')}"
     ckpt_name = f"{ckpt_stem}_best.pt"
     if args.fold is not None:
         ckpt_name = ckpt_name.replace("_best.pt", f"_fold{args.fold}_best.pt")
@@ -107,6 +119,11 @@ def run(args: argparse.Namespace) -> None:
                 logits = model(crops)
                 loss = bce_dice_loss(logits, masks)
             scaler.scale(loss).backward()
+            # Unscale before clipping so the norm is measured on real gradients. Without
+            # this a single bad batch under fp16 sends the loss to nan and it never
+            # recovers - observed with the pretrained ResNet18 encoder at lr 1e-3.
+            scaler.unscale_(opt)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(opt)
             scaler.update()
             running_loss += loss.item() * crops.size(0)

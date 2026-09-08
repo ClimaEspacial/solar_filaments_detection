@@ -19,7 +19,7 @@ from solar_filaments.eval.self_eval import build_val_gt_pred_dataframes, build_v
 
 
 from solar_filaments.inference import predict_instances, predict_instances_obb
-from solar_filaments.models.unet import EdgeAttUNet
+from solar_filaments.models.refiner import ENCODERS, load_refiner
 
 
 def _score(overlap_df: pd.DataFrame, label: str) -> float:
@@ -68,6 +68,15 @@ def add_args(parser: argparse.ArgumentParser) -> None:
                               "neither the box score nor the saturated refiner confidence provides")
     parser.add_argument("--semantic-weights", default=None,
                          help="default: work_dir/checkpoints/flat_unet[_fold<N>]_best.pt")
+    parser.add_argument("--rescorer-thres", type=float, default=None,
+                         help="keep candidates whose PREDICTED annotator support clears this "
+                              "(see rescore.py; ~0.32 is the break-even from the marginal analysis). "
+                              "Requires a model from `filament train-rescorer`")
+    parser.add_argument("--rescorer-weights", default=None,
+                         help="default: work_dir/checkpoints/rescorer[_fold<N>].pkl")
+    parser.add_argument("--encoder", choices=ENCODERS, default="base",
+                         help="which refiner checkpoint to default to: 'base' -> unet[...]_best.pt, "
+                              "'resnet18' -> unet[...]_r18_best.pt (from `train-unet --encoder resnet18`)")
     add_backend_args(parser)
     parser.add_argument("--fold", default=None,
                          help="evaluate this fold (int, from `filament prepare --k-folds`), or 'all' to pool "
@@ -109,10 +118,21 @@ def _default_weights(paths: Paths, args: argparse.Namespace, fold):
         unet_stem += "_norm"
     if args.instance_norm:
         unet_stem += "_in"
+    if args.encoder != "base":
+        unet_stem += f"_{args.encoder.replace('resnet', 'r')}"
     unet_name = f"{unet_stem}_fold{fold}_best.pt" if fold is not None else f"{unet_stem}_best.pt"
     yolo_weights = args.yolo_weights or str(paths.runs_dir / name / "weights" / "best.pt")
     unet_weights = args.unet_weights or str(paths.ckpt_dir / unet_name)
     return yolo_weights, unet_weights
+
+
+def _load_rescorer(paths: Paths, args: argparse.Namespace, fold):
+    """The candidate re-scorer, or None when --rescorer-thres is not given."""
+    if args.rescorer_thres is None:
+        return None
+    from solar_filaments.rescore import Rescorer
+    name = f"rescorer_fold{fold}.pkl" if fold is not None else "rescorer.pkl"
+    return Rescorer.load(args.rescorer_weights or (paths.ckpt_dir / name), threshold=args.rescorer_thres)
 
 
 def _load_segmenter(paths: Paths, args: argparse.Namespace, device, fold):
@@ -129,9 +149,10 @@ def _load_segmenter(paths: Paths, args: argparse.Namespace, device, fold):
 def _load_unet(paths: Paths, args: argparse.Namespace, device, fold):
     _, unet_weights = _default_weights(paths, args, fold)
     norm_layer = "instance" if args.instance_norm else "batch"
-    unet_model = EdgeAttUNet(use_edge_attention=UNetConfig().use_edge_attention, norm_layer=norm_layer).to(device)
-    unet_model.load_state_dict(torch.load(unet_weights, map_location=device))
-    unet_model.eval()
+    # The encoder is read back from the checkpoint itself, so --encoder only picks the
+    # default filename; a mismatch raises instead of loading the wrong architecture.
+    unet_model = load_refiner(unet_weights, device, use_edge_attention=UNetConfig().use_edge_attention,
+                               norm_layer=norm_layer)
     return unet_model
 
 
@@ -189,7 +210,8 @@ def _run_all_folds(paths: Paths, args: argparse.Namespace, dataset, device, crop
         gt_df, pred_df = build_val_gt_pred_dataframes(
             dataset, paths.train_img_dir, sorted(val_ids), yolo_model, unet_model, device, crop_cfg, inference_cfg,
             obb=args.obb, preprocess=args.normalize, use_tta=args.tta, predict_fn=predict_fn,
-            segmenter=_load_segmenter(paths, args, device, fold), semantic_thres=args.semantic_thres)
+            segmenter=_load_segmenter(paths, args, device, fold), semantic_thres=args.semantic_thres,
+            rescorer=_load_rescorer(paths, args, fold))
         print(f"[fold {fold}] GT filaments: {len(gt_df)}   predicted filaments: {len(pred_df)}")
         all_gt.append(gt_df)
         all_pred.append(pred_df)
@@ -328,13 +350,14 @@ def run(args: argparse.Namespace) -> None:
         yolo_model = unet_model = None
         predict_fn = _backend_predict_fn(paths, args, device, fold, crop_cfg, inference_cfg)
     segmenter = _load_segmenter(paths, args, device, fold)
+    rescorer = _load_rescorer(paths, args, fold)
     _, val_ids = load_split(paths.split_path_for(fold))
 
     def run_self_eval(image_ids, label):
         gt_df, pred_df = build_val_gt_pred_dataframes(
             dataset, paths.train_img_dir, image_ids, yolo_model, unet_model, device, crop_cfg, inference_cfg,
             obb=args.obb, preprocess=args.normalize, use_tta=args.tta, predict_fn=predict_fn,
-            segmenter=segmenter, semantic_thres=args.semantic_thres)
+            segmenter=segmenter, semantic_thres=args.semantic_thres, rescorer=rescorer)
         print(f"[{label}] GT filaments: {len(gt_df)}   predicted filaments: {len(pred_df)}")
         overlap_df = get_overlap_df(gt_df, pred_df)
         return overlap_df, _score(overlap_df, label)

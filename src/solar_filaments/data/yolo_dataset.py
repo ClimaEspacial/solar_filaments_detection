@@ -65,6 +65,16 @@ def _build(dataset: Dataset, train_img_dir: Path, yolo_dir: Path, train_ids: set
            label_fn: Callable[[List[dict], int, int], List[str]]) -> Path:
     for split, ids in [("train", train_ids), ("val", val_ids)]:
         img_dir, label_dir = yolo_dir / "images" / split, yolo_dir / "labels" / split
+        # Wipe the split before repopulating. Without this, images from a *previous*
+        # prepare with a different split linger: a later `--val-frac 0` run leaves the
+        # old validation images in place while also adding them to train, so ultralytics
+        # validates on data it trained on and selects `best.pt` on seen images. Observed
+        # in practice (707 train / 70 stale val, val entirely contained in train).
+        for d in (img_dir, label_dir):
+            if d.exists():
+                for f in d.iterdir():
+                    if f.is_file() or f.is_symlink():
+                        f.unlink()
         img_dir.mkdir(parents=True, exist_ok=True)
         label_dir.mkdir(parents=True, exist_ok=True)
         for file_name, info, anns in merged_records(dataset, ids, annotator_merge):

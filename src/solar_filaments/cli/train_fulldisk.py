@@ -11,7 +11,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from solar_filaments.config import FullDiskConfig, Paths
-from solar_filaments.data.coco import Dataset, load_split
+from solar_filaments.data.coco import ANNOTATOR_MERGE_MODES, Dataset, load_split
 from solar_filaments.data.fulldisk_dataset import FullDiskDataset
 from solar_filaments.losses import bce_dice_loss, dice_score
 from solar_filaments.models.flat_unet import FlatUNet
@@ -29,6 +29,11 @@ def add_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--num-workers", type=int, default=cfg.num_workers)
     parser.add_argument("--fold", type=int, default=None,
                          help="train on this fold's split; checkpoint flat_unet_fold<N>_best.pt")
+    parser.add_argument("--annotator-merge", choices=ANNOTATOR_MERGE_MODES, default="union",
+                         help="how to build the semantic target from 1-3 annotator records: 'union' = every "
+                              "filament anyone marked (max recall, but 31%% of them are marked by a minority "
+                              "and are the same low-contrast cases the detector misses); 'majority' = only "
+                              "filaments >=50%% of annotators agree on (cleaner target); 'single' = first record")
     parser.add_argument("--bce-weight", type=float, default=cfg.bce_weight,
                          help="weight of BCE vs Dice in the loss (filaments cover ~1% of pixels, so pure "
                               "BCE under-segments; the default mixes in Dice)")
@@ -44,10 +49,11 @@ def run(args: argparse.Namespace) -> None:
     train_ids, val_ids = load_split(paths.split_path_for(args.fold))
     synthetic_img_dir = paths.synthetic_img_dir_for(args.fold)
 
-    train_ds = FullDiskDataset(dataset, paths.train_img_dir, train_ids, imgsz=args.imgsz,
-                               augment=True, synthetic_img_dir=synthetic_img_dir)
-    val_ds = FullDiskDataset(dataset, paths.train_img_dir, val_ids, imgsz=args.imgsz,
-                             augment=False, synthetic_img_dir=synthetic_img_dir)
+    train_ds = FullDiskDataset(dataset, paths.train_img_dir, train_ids, imgsz=args.imgsz, augment=True,
+                               synthetic_img_dir=synthetic_img_dir, annotator_merge=args.annotator_merge)
+    # the validation target always uses the same rule, so val dice stays comparable across runs
+    val_ds = FullDiskDataset(dataset, paths.train_img_dir, val_ids, imgsz=args.imgsz, augment=False,
+                             synthetic_img_dir=synthetic_img_dir, annotator_merge=args.annotator_merge)
     has_val = len(val_ds) > 0
     print(f"train images: {len(train_ds)}  val images: {len(val_ds)}  @ {args.imgsz}x{args.imgsz}")
     if not has_val:
@@ -65,7 +71,8 @@ def run(args: argparse.Namespace) -> None:
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
     scaler = torch.amp.GradScaler(device.type, enabled=device.type == "cuda")
 
-    name = f"flat_unet_fold{args.fold}_best.pt" if args.fold is not None else "flat_unet_best.pt"
+    stem = "flat_unet" if args.annotator_merge == "union" else f"flat_unet_{args.annotator_merge}"
+    name = f"{stem}_fold{args.fold}_best.pt" if args.fold is not None else f"{stem}_best.pt"
     ckpt_path = paths.ckpt_dir / name
     best = 0.0
     for epoch in range(args.epochs):

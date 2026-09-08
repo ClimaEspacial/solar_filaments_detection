@@ -7,7 +7,7 @@ from ultralytics import YOLO
 from solar_filaments.cli._backends import add_backend_args, build_detector, make_predict_fn
 from solar_filaments.config import CropConfig, InferenceConfig, Paths, UNetConfig, YoloConfig
 from solar_filaments.inference import predict_instances, predict_instances_obb
-from solar_filaments.models.unet import EdgeAttUNet
+from solar_filaments.models.refiner import ENCODERS, load_refiner
 from solar_filaments.rle import encode_rle_counts
 
 
@@ -49,7 +49,16 @@ def add_args(parser: argparse.ArgumentParser) -> None:
                               "(0 = off); independent second opinion on low-confidence detections")
     parser.add_argument("--semantic-weights", default=None,
                          help="default: work_dir/checkpoints/flat_unet[_fold<N>]_best.pt")
+    parser.add_argument("--rescorer-thres", type=float, default=None,
+                         help="keep candidates whose PREDICTED annotator support clears this "
+                              "(see rescore.py; ~0.32 is the break-even from the marginal analysis). "
+                              "Requires a model from `filament train-rescorer`")
+    parser.add_argument("--rescorer-weights", default=None,
+                         help="default: work_dir/checkpoints/rescorer[_fold<N>].pkl")
     add_backend_args(parser)
+    parser.add_argument("--encoder", choices=ENCODERS, default="base",
+                         help="which refiner checkpoint to default to: 'base' -> unet[...]_best.pt, "
+                              "'resnet18' -> unet[...]_r18_best.pt (from `train-unet --encoder resnet18`)")
     parser.add_argument("--fold", type=int, default=None,
                          help="use this fold's weights (from `filament prepare --k-folds`); "
                               "default: no fold suffix (the single-split model)")
@@ -69,23 +78,32 @@ def run(args: argparse.Namespace) -> None:
         unet_stem += "_norm"
     if args.instance_norm:
         unet_stem += "_in"
+    if args.encoder != "base":
+        unet_stem += f"_{args.encoder.replace('resnet', 'r')}"
     default_unet_name = f"{unet_stem}_fold{args.fold}_best.pt" if args.fold is not None else f"{unet_stem}_best.pt"
     yolo_weights = args.yolo_weights or str(paths.runs_dir / yolo_name / "weights" / "best.pt")
     unet_weights = args.unet_weights or str(paths.ckpt_dir / default_unet_name)
     out_path = args.out or str(paths.work_dir / "submission.csv")
 
     norm_layer = "instance" if args.instance_norm else "batch"
-    unet_model = EdgeAttUNet(use_edge_attention=UNetConfig().use_edge_attention, norm_layer=norm_layer).to(device)
-    unet_model.load_state_dict(torch.load(unet_weights, map_location=device))
-    unet_model.eval()
+    # The encoder is read back from the checkpoint itself, so --encoder only picks the
+    # default filename; a mismatch raises instead of loading the wrong architecture.
+    unet_model = load_refiner(unet_weights, device, use_edge_attention=UNetConfig().use_edge_attention,
+                               norm_layer=norm_layer)
 
     crop_cfg = CropConfig(use_spine_orientation=args.spine_orientation, use_obb_orientation=args.obb)
     inference_cfg = InferenceConfig(conf_thres=args.conf_thres, iou_thres=args.iou_thres, imgsz=args.imgsz,
                                      mask_nms_thresh=args.mask_nms_thresh, mask_conf_thres=args.mask_conf_thres,
                                      mask_thresh=args.mask_thresh, min_elongation=args.min_elongation)
 
+    rescorer = None
+    if args.rescorer_thres is not None:
+        from solar_filaments.rescore import Rescorer
+        rname = f"rescorer_fold{args.fold}.pkl" if args.fold is not None else "rescorer.pkl"
+        rescorer = Rescorer.load(args.rescorer_weights or (paths.ckpt_dir / rname), threshold=args.rescorer_thres)
+
     segmenter = None
-    if args.semantic_thres > 0.0:
+    if args.semantic_thres > 0.0 or rescorer is not None:
         from solar_filaments.detectors.fulldisk import FullDiskSegmenter, load_flat_unet
         sem_name = f"flat_unet_fold{args.fold}_best.pt" if args.fold is not None else "flat_unet_best.pt"
         sem_model, sem_imgsz = load_flat_unet(args.semantic_weights or str(paths.ckpt_dir / sem_name), device)
@@ -126,7 +144,7 @@ def run(args: argparse.Namespace) -> None:
                 mask_nms_thresh=inference_cfg.mask_nms_thresh, mask_conf_thres=inference_cfg.mask_conf_thres,
                 use_spine_orientation=crop_cfg.use_spine_orientation, min_elongation=inference_cfg.min_elongation,
                 preprocess=args.normalize, use_tta=args.tta,
-                segmenter=segmenter, semantic_thres=args.semantic_thres,
+                segmenter=segmenter, semantic_thres=args.semantic_thres, rescorer=rescorer,
             )
         for inst_id in range(1, int(label_map.max()) + 1):
             mask = label_map == inst_id

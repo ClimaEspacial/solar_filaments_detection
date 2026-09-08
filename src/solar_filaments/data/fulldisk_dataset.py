@@ -2,11 +2,18 @@
 image) for the Flat U-Net branch.
 
 Unlike the crop dataset (one sample per filament) this yields one sample per
-*physical image*, with the mask being the union of every annotator's filaments.
-The union - not the majority consensus - is deliberate: this branch exists to
-provide an independent high-recall "is there a filament here?" signal used to
-revalidate the detector's low-confidence boxes, so it should know about every
-filament anyone marked.
+*physical image*, with the mask built from the annotators' filaments according
+to `annotator_merge` (see `coco.merge_annotator_records`).
+
+Choosing that mode is a real trade-off, measured on this data. The `union` of
+every annotator's filaments maximizes the recall signal, which is what a
+candidate-validation branch nominally wants - but it also asks the network to
+fit filaments that most annotators did *not* mark: 31% of clustered filaments
+on multi-annotator images have support below 0.5. Those are precisely the
+low-contrast cases the detector also misses (69% miss rate at support 0.33 vs
+13% at support 1.0), so training on the union means training partly on
+disagreement. `majority` trades some recall for a target the annotators
+actually agree on.
 
 Preprocessing is min-max normalization only. The Flat U-Net paper is explicit
 that full-disk H-alpha images "require only min-max normalization without the
@@ -23,7 +30,7 @@ import torch
 from torch.utils.data import Dataset as TorchDataset
 
 from solar_filaments.data.augment_ops import random_gamma
-from solar_filaments.data.coco import Dataset, load_image, polygon_to_mask
+from solar_filaments.data.coco import Dataset, load_image, merge_annotator_records, polygon_to_mask
 
 
 def minmax_normalize(img: np.ndarray) -> np.ndarray:
@@ -33,23 +40,27 @@ def minmax_normalize(img: np.ndarray) -> np.ndarray:
     return (img - lo) / (hi - lo) if hi > lo else np.zeros_like(img)
 
 
-def union_mask(dataset: Dataset, file_name: str, height: int, width: int) -> np.ndarray:
-    """Union of every filament from every annotator record of this image."""
+def semantic_mask(anns, height: int, width: int) -> np.ndarray:
+    """Binary filaments-vs-background mask from a list of annotation dicts."""
     mask = np.zeros((height, width), dtype=np.uint8)
-    for img_id in dataset.file_name_to_image_ids[file_name]:
-        for ann in dataset.anns_by_image[img_id]:
-            mask |= polygon_to_mask(ann["segmentation"], height, width)
+    for ann in anns:
+        mask |= polygon_to_mask(ann["segmentation"], height, width)
     return mask
 
 
 class FullDiskDataset(TorchDataset):
     def __init__(self, dataset: Dataset, train_img_dir: Path, image_ids, imgsz: int = 512,
-                 augment: bool = False, synthetic_img_dir: Optional[Path] = None):
+                 augment: bool = False, synthetic_img_dir: Optional[Path] = None,
+                 annotator_merge: str = "union"):
         self.dataset, self.train_img_dir, self.synthetic_img_dir = dataset, train_img_dir, synthetic_img_dir
         self.imgsz, self.augment = imgsz, augment
         ids = set(image_ids)
         self.file_names = [fn for fn, rec_ids in dataset.file_name_to_image_ids.items()
                            if any(i in ids for i in rec_ids)]
+        # Cluster annotators once here, not per __getitem__: the clustering is O(0.3 s)
+        # per multi-annotator image and would otherwise be repeated every epoch.
+        self.anns_by_file = {fn: merge_annotator_records(dataset, fn, annotator_merge)
+                             for fn in self.file_names}
 
     def __len__(self):
         return len(self.file_names)
@@ -59,7 +70,7 @@ class FullDiskDataset(TorchDataset):
         img_id = self.dataset.file_name_to_image_ids[file_name][0]
         info = self.dataset.images_by_id[img_id]
         img = load_image(self.dataset.resolve_image_path(img_id, self.train_img_dir, self.synthetic_img_dir))
-        mask = union_mask(self.dataset, file_name, info["height"], info["width"])
+        mask = semantic_mask(self.anns_by_file[file_name], info["height"], info["width"])
 
         s = self.imgsz
         img = cv2.resize(img, (s, s), interpolation=cv2.INTER_AREA)

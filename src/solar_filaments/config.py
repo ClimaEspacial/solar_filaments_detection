@@ -169,12 +169,22 @@ class InferenceConfig:
     # - 5-fold OOF (707 images, majority-consensus targets): 0.15 best by a lot (OOF PQ
     #   .15->0.4383, .25->0.4227, .35->0.3604)
     # - real leaderboard: 6 submissions, conf~0.35 scored 0.36 three times, conf~0.15 scored
-    #   0.34 three times, across two different model generations - i.e. the board agrees with
-    #   the single-split number and disagrees with the OOF number. Working hypothesis: the
-    #   "majority" annotator-merge training target (see data/coco.py) is what breaks the OOF
-    #   estimate's transferability, not OOF cross-validation in general - unconfirmed. Until
-    #   this is root-caused, trust real submissions over either local number; see project
-    #   memory "solar-filaments-restructure" before changing this value.
+    #   0.34 three times, across two different model generations.
+    #
+    # RESOLVED 2026-09-06, and the conclusion is that this knob is dead. Five further
+    # submissions spanning conf 0.15-0.30 on the all-data seg@2048 model ALL scored 0.36,
+    # and the local sweep agrees (PQ 0.4407/0.4493/0.4472, spread 0.009 against a
+    # two-decimal board). Lowering conf trades FN for FP at ~1:1; SQ stays pinned at
+    # 0.67-0.68 throughout. We sit on the flat top of the precision/recall curve, so no
+    # value of this parameter buys anything - do not spend submissions sweeping it.
+    #
+    # The transferability failure was the "majority" annotator-merge target, now measured:
+    # recall is 27% on support<0.5 filaments vs 70% on support>=0.5, because that target
+    # taught the detector to skip them, while PQ scores every annotator record. The
+    # marginal analysis puts break-even support at 0.32, below every support level that
+    # occurs in MAGFiLO (0.33/0.50/0.67/1.00), so `union` is the correct target and
+    # `majority` was a calibration error. See project memory
+    # "project-solar-filaments-union-target" and "-conf-threshold-dead".
     conf_thres: float = 0.35
     iou_thres: float = 0.5
     imgsz: int = 1024
