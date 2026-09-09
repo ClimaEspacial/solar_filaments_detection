@@ -27,6 +27,11 @@ def add_args(parser: argparse.ArgumentParser) -> None:
                               "_r18-suffixed checkpoint; no flag needed at inference (the encoder is "
                               "read back from the checkpoint)")
     parser.add_argument("--crop-size", type=int, default=crop_cfg.crop_size)
+    parser.add_argument("--pad-factor", type=float, default=crop_cfg.pad_factor,
+                         help="context around each filament's box in the training crops. The refiner "
+                              "memorises this scale: a model trained at one value and run at another "
+                              "loses 0.08 PQ per 0.25 of mismatch, so whatever is set here must be "
+                              "passed to evaluate/predict as well. Checkpoint gets a _padNNN suffix")
     parser.add_argument("--num-workers", type=int, default=cfg.num_workers)
     parser.add_argument("--spine-orientation", action="store_true",
                          help="rotate crops so the GT spine lies horizontal, instead of axis-aligned bbox crops "
@@ -62,7 +67,8 @@ def run(args: argparse.Namespace) -> None:
     train_ids, val_ids = load_split(paths.split_path_for(args.fold))
     synthetic_img_dir = paths.synthetic_img_dir_for(args.fold)
 
-    crop_cfg = CropConfig(crop_size=args.crop_size, use_spine_orientation=args.spine_orientation,
+    crop_cfg = CropConfig(crop_size=args.crop_size, pad_factor=args.pad_factor,
+                           use_spine_orientation=args.spine_orientation,
                            use_obb_orientation=args.obb)
     train_crop_ds = FilamentCropDataset(dataset, paths.train_img_dir, train_ids,
                                          crop_cfg.crop_size, crop_cfg.pad_factor, crop_cfg.min_crop_side,
@@ -100,6 +106,8 @@ def run(args: argparse.Namespace) -> None:
         ckpt_stem += "_in"
     if args.encoder != "base":
         ckpt_stem += f"_{args.encoder.replace('resnet', 'r')}"
+    if abs(args.pad_factor - CropConfig().pad_factor) > 1e-6:
+        ckpt_stem += f"_pad{int(round(args.pad_factor * 100))}"
     ckpt_name = f"{ckpt_stem}_best.pt"
     if args.fold is not None:
         ckpt_name = ckpt_name.replace("_best.pt", f"_fold{args.fold}_best.pt")

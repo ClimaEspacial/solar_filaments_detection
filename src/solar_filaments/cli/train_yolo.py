@@ -1,4 +1,5 @@
 import argparse
+import pathlib
 
 import torch
 from ultralytics import YOLO
@@ -30,6 +31,10 @@ def add_args(parser: argparse.ArgumentParser) -> None:
                          help="train on the limb-darkening-flattened + CLAHE-preprocessed dataset "
                               "(from `filament prepare --normalize`) instead of raw images - "
                               "not combinable with --obb this round")
+    parser.add_argument("--data", default=None,
+                         help="path to a data.yaml, overriding the prepared dataset. Used for the "
+                              "semi-supervised runs, whose training set mixes real and pseudo-labelled "
+                              "images (see work/build_semisup_dataset.py)")
     parser.add_argument("--seg", action="store_true",
                          help="train a YOLO11 instance-segmentation model (yolo11s-seg.pt, downloaded by "
                               "ultralytics on first use) on the polygon dataset from `filament prepare --seg`; "
@@ -61,7 +66,7 @@ def run(args: argparse.Namespace) -> None:
         yolo_dir = paths.yolo_seg_dir_for(args.fold)
     else:
         yolo_dir = paths.yolo_dir_for(args.fold)
-    data_yaml = yolo_dir / "data.yaml"
+    data_yaml = pathlib.Path(args.data) if args.data else yolo_dir / "data.yaml"
     if not data_yaml.exists():
         hint = " --obb" if args.obb else (" --normalize" if args.normalize else (" --seg" if args.seg else ""))
         fold_hint = f" --k-folds ..." if args.fold is not None else ""
