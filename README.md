@@ -1,4 +1,4 @@
-# ThreadNet — Solar Filament Segmentation 2026
+# MaskStitch — Solar Filament Segmentation 2026
 
 Our solution to the [Solar Filament Segmentation Challenge 2026](https://www.kaggle.com/competitions/filament-segmentation-2026)
 (Kaggle / IEEE BigData Cup), on the MAGFiLO GONG H-alpha dataset. A YOLO11
@@ -11,6 +11,12 @@ organizer self-eval logic), scoring **0.37** on the withheld test partition — 
 for the full methodology, ablations, and discussion, or run through
 [`notebooks/pipeline_walkthrough.ipynb`](notebooks/pipeline_walkthrough.ipynb)
 for an executable, illustrated walkthrough of the whole pipeline.
+
+[`notebooks/pipeline_walkthrough.ipynb`](notebooks/pipeline_walkthrough.ipynb) runs the
+whole thing end to end — data, rasterization convention, detect, crop, refine, stitch,
+evaluate — and regenerates the submitted CSV. Its output is **byte-identical** to the
+submitted file (same SHA-256 over the sorted rows), so nothing outside the repository is
+needed to reproduce the predictions.
 
 Originally prototyped as a Kaggle notebook (kept for reference in
 [`notebooks/`](notebooks/)); the pipeline lives as an installable Python
