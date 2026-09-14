@@ -18,6 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+dev = ["pytest>=8"]
 notebook = ["jupyter", "ipykernel", "nbconvert"]
 
 [project.scripts]
@@ -29,3 +30,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

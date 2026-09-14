@@ -35,7 +35,7 @@ def add_args(parser: argparse.ArgumentParser) -> None:
                               "and are the same low-contrast cases the detector misses); 'majority' = only "
                               "filaments >=50%% of annotators agree on (cleaner target); 'single' = first record")
     parser.add_argument("--bce-weight", type=float, default=cfg.bce_weight,
-                         help="weight of BCE vs Dice in the loss (filaments cover ~1% of pixels, so pure "
+                         help="weight of BCE vs Dice in the loss (filaments cover ~1%% of pixels, so pure "
                               "BCE under-segments; the default mixes in Dice)")
 
 

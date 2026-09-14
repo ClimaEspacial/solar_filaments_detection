@@ -46,8 +46,13 @@ from solar_filaments.data.oriented_crop import (apply_affine_points, clip_patch_
                                                  pca_angle_and_elongation, rotation_matrix)
 
 
+@torch.no_grad()
 def _segment(unet_model, device, crop: np.ndarray, crop_size: int, mask_thresh: float):
-    """Letterbox `crop`, run the U-Net, return (mask_letterboxed, prob, scale, left, top)."""
+    """Letterbox `crop`, run the U-Net, return (mask_letterboxed, prob, scale, left, top).
+
+    Decorated rather than relying on the caller: the public entry points already disable
+    gradients, but this is also reachable directly (from a notebook, say), where the tensor
+    would still require grad and `.numpy()` would raise."""
     crop_letterboxed, scale, left, top = letterbox_resize(crop, crop_size)
     crop_t = torch.from_numpy(crop_letterboxed).float().unsqueeze(0).unsqueeze(0).to(device) / 255.0
     logits = unet_model(crop_t)

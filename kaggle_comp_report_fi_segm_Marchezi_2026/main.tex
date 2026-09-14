@@ -42,7 +42,7 @@
 \email{jpmarchezi@gmail.com}
 
 \begin{abstract}
-    This report describes our solution to the Solar Filament Segmentation Challenge~2026, a Kaggle competition on automatic segmentation of solar filaments in GONG H-$\alpha$ observations. Our pipeline, ThreadNet, detects filaments with a YOLO11 object detector, refines each detected region with a compact edge-attention U-Net, and stitches the resulting crop-level masks back into a full-resolution instance map with a greedy, confidence-ordered mask-level non-maximum suppression. We explore five independent extensions to this baseline -- $k$-fold cross-validation with copy-paste augmentation, oriented bounding boxes, model ensembling with a classical (non-learned) detector, photometric normalization, and flip-based test-time augmentation (TTA) -- and report which of them survive validation. Only topology-safe flip-4 TTA improves on the baseline, raising the pooled Panoptic Quality (PQ) from 0.4381 to 0.4405 on our held-out validation split, comfortably above the organizers' stated threshold of practical value (PQ~$>$~0.35).
+    This report describes our solution to the Solar Filament Segmentation Challenge~2026, on automatic instance segmentation of solar filaments in GONG H-$\alpha$ observations. Our pipeline, ThreadNet, detects filaments with a YOLO11 network, refines each detected region with a compact edge-attention U-Net, and stitches the crop-level masks into a full-resolution instance map by greedy, confidence-ordered mask-level non-maximum suppression. Its adopted configuration reaches a pooled Panoptic Quality (PQ) of 0.4571 on our held-out split and 0.37 on the withheld test partition. The bulk of this report is what the search around that configuration returned. We varied ten axes --- detector architecture across a factor of three in capacity and four in input pixels, the annotator-merge target, refiner capacity, crop context, a learned candidate re-scorer, an additional proposal source, oriented boxes, photometric normalization, and self-training on 2500 unlabelled archive images --- and none of them cleared the measured noise floor. Two things did. Correcting the polygon rasterization convention, an evaluation detail rarely reported, changed the metric by more than any model change. Retuning the detection and mask thresholds \emph{jointly} rather than one at a time was worth 0.014~PQ, and was the only change our blind-partition score confirmed. We report the negative results in full, including a self-training study in which label density alone moves the outcome across the entire observed range.
 \end{abstract}
 
 \maketitle
@@ -53,7 +53,9 @@
 \section{Introduction}
     This report goes over the details of our submitted solution to the Solar Filament Segmentation Challenge~2026 \cite{filament-segmentation-2026}. The challenge, launched on July~10,~2026, is organized by the Earth-Space AI Research (ESAIR) Lab\footnote{\href{https://www.esairlab.com/home}{www.esairlab.com/}}. This challenge utilizes the MAGFiLO dataset for evaluation of the segmentation algorithms \cite{ahmadzadeh2024dataset}.
 
-    Rather than a single novel architecture, our contribution is a systematic search over the space of reasonable extensions to a strong detect-then-segment baseline, each validated in isolation against the same held-out split before being adopted or discarded. Section~\ref{sec:methodology} describes the adopted pipeline, ThreadNet, and the extensions we tested; Section~\ref{sec:evaluation} reports which of them actually improved Panoptic Quality (PQ), the competition's ranking metric, and discusses the failure modes that remain.
+    Rather than a single novel architecture, our contribution is a systematic search over the space of reasonable extensions to a strong detect-then-segment baseline, each validated in isolation against the same held-out split before being adopted or discarded. That search returned an unusually consistent answer, and reporting it honestly is the point of this document: across ten independent axes, spanning a factor of three in model capacity and four in input resolution, nothing moved the metric. What did move it was an evaluation-protocol detail and a pair of inference constants that had been tuned separately and interact.
+
+    Section~\ref{sec:methodology} describes the adopted pipeline, ThreadNet, and the axes we varied; Section~\ref{sec:evaluation} reports what each returned, why we trust the nulls, and where the residual error actually lives.
 
 
 % ==================================== %
@@ -62,15 +64,15 @@
 \section{Methodology}\label{sec:methodology}
 
 \subsection{Pipeline overview}
-    ThreadNet follows a detect-crop-refine design (Figure~\ref{fig:pipeline}). A YOLO11s object detector \cite{jocher2023yolo}, trained on the full-disk image downsampled to $1024\times1024$, proposes an axis-aligned bounding box per candidate filament. Each box is padded (by a factor of $1.35\times$ its size, or a minimum of 48\,px) and letterbox-resized to a $256\times256$ crop that preserves the filament's native aspect ratio -- an important detail, since filaments are long and thin, and a naive square crop wastes most of its resolution on empty margin once resized. A compact U-Net (8.8M parameters, base width 32) with an edge-guided self-attention bottleneck \cite{ronneberger2015unet, solomon2025edgeattnet} then predicts a binary mask for the crop; the edge-attention mechanism biases the bottleneck's Query/Key projections with a learned edge map of the input crop, which helps recover the thin, low-contrast barbs that branch off a filament's main spine.
+    ThreadNet follows a detect-crop-refine design (Figure~\ref{fig:pipeline}). A YOLO11 network \cite{jocher2023yolo} proposes each candidate filament on the full disk. We tried two variants: a 9M-parameter box detector at $1024\times1024$, and a 27.6M-parameter instance-segmentation network at the native $2048\times2048$. Section~\ref{sec:evaluation} shows the two to be indistinguishable on held-out data; we adopt the second, and the adopted configuration is that detector with a detection threshold of 0.25, the refiner below at a mask threshold of 0.5, and flip-4 test-time augmentation. Each box is padded (by a factor of $1.35\times$ its size, or a minimum of 48\,px) and letterbox-resized to a $256\times256$ crop that preserves the filament's native aspect ratio -- an important detail, since filaments are long and thin, and a naive square crop wastes most of its resolution on empty margin once resized. A compact U-Net (8.8M parameters, base width 32) with an edge-guided self-attention bottleneck \cite{ronneberger2015unet, solomon2025edgeattnet} then predicts a binary mask for the crop; the edge-attention mechanism biases the bottleneck's Query/Key projections with a learned edge map of the input crop, which helps recover the thin, low-contrast barbs that branch off a filament's main spine.
 
-    Each crop-level mask is un-letterboxed back to its native resolution and pasted into the full $2048\times2048$ label map. Because ordinary box-level non-maximum suppression is a poor proxy for ``same object'' on long, thin, diagonal filaments, instances are merged with a \emph{mask-level} greedy NMS instead: candidates are processed in decreasing detection confidence, and a candidate is rejected outright if it is already mostly covered by a higher-confidence instance, rather than accepted as a fragment.
+    Each crop-level mask is un-letterboxed back to its native resolution and pasted into the full $2048\times2048$ label map. Because ordinary box-level non-maximum suppression is a poor proxy for ``same object'' on long, thin, diagonal filaments, instances are merged with a \emph{mask-level} greedy NMS instead: candidates are processed in decreasing detection confidence, and a candidate is rejected outright if it is already mostly covered by a higher-confidence instance, rather than accepted as a fragment. \citet{guo2022condinst} reach the same conclusion for this dataset family and replace box NMS with Matrix NMS for the same reason.
 
     \begin{figure}[t]
       \centering
       \includegraphics[width=\linewidth]{figures/pipeline.pdf}
       \caption{ThreadNet's inference pipeline: detect, crop, refine (with optional flip-4 TTA), un-letterbox, and stitch via mask-level NMS.}
-      \Description{Six-box flow diagram showing a full-disk H-alpha image processed by a YOLO11s detector, then a padded and letterboxed crop, then a U-Net refiner with test-time augmentation, then undone letterboxing, mask-level non-maximum suppression, and a final instance label map.}
+      \Description{Seven-box flow diagram showing a full-disk H-alpha image processed by a YOLO11 detector, then a padded and letterboxed crop, then an edge-attention U-Net refiner with test-time augmentation, then undone letterboxing, mask-level non-maximum suppression, and a final instance label map with RLE submission.}
       \label{fig:pipeline}
     \end{figure}
 
@@ -79,82 +81,125 @@
 
     The U-Net is trained on independently cropped filaments (one crop per annotation) with random horizontal/vertical flips, a random $90^\circ$ rotation, and gamma correction ($\gamma \sim U(0.5, 1.5)$, applied with probability 0.9) for invariance to nonlinear brightness variation -- motivated by a real, measured limb-darkening gradient in this dataset (mean on-disk intensity falls from about 140 near disk center to about 76 near the limb) and matching the augmentation recipe of \citet{hu2026modernconvnet}. The YOLO detector is trained with flips and mild rotation/scale/translation jitter; mosaic augmentation and all color jitter are disabled, since these are single-channel grayscale observations.
 
-\subsection{Extensions explored}
-    Beyond this baseline, we implemented and validated five independent extensions, each toggleable in isolation:
-    \begin{itemize}
-        \item \textbf{$k$-fold CV + copy-paste augmentation}: synthetic training images built by pasting real filament patches (their own polygon mask, feathered and brightness-matched) onto other on-disk backgrounds, away from existing ground truth.
-        \item \textbf{Oriented bounding boxes (OBB)}: a YOLO11s-obb detector predicting the filament's orientation directly, with a single-pass rotate-crop-segment-unrotate inference path.
-        \item \textbf{Model ensembling}: merging the axis-aligned and OBB pipelines, and a classical, non-learned Shih-and-Kowalski-style detector (local-median thresholding and multi-directional morphological closing), via the same mask-level NMS used for stitching, applied across sources instead of within one.
-        \item \textbf{Photometric normalization}: dividing each on-disk pixel by its smoothed radial-average intensity to flatten limb darkening, followed by CLAHE, applied to both detector and refiner inputs; and InstanceNorm in place of BatchNorm in the U-Net, following \citet{hu2026modernconvnet}.
-        \item \textbf{Flip-4 test-time augmentation (TTA)}: at inference, the U-Net's probability map is averaged over the identity, horizontal-flip, vertical-flip, and both-flip views of a crop. The average is trusted only if it does not change the single-view mask's topology: its area must stay within $[0.6, 1.7]\times$ the single-view area, its connected-component count must not grow by more than one, and (once the single-view mask is large enough for the comparison to be meaningful) its Dice overlap against the single-view mask must be at least 0.62. Otherwise, inference falls back to the plain single-view mask. This guard is what makes the technique safe to compose with everything else in the pipeline: it can only remove noise from a prediction, never introduce a qualitatively different one.
-    \end{itemize}
-    Section~\ref{sec:evaluation} reports that only the last of these, flip-4 TTA, improved PQ over the baseline; the others are retained in our public repository as validated negative results.
+\subsection{What we varied}
+    Every axis below is an independent, opt-in switch in the released code, evaluated in isolation on the same held-out split with its own detection-threshold sweep. They fall into four groups.
 
+    \textbf{Capacity and architecture.} The two detectors above; a torchvision Mask R-CNN backend with anchors resized for elongated objects; and the refiner's own encoder, compared against an ImageNet-pretrained ResNet18 that raises its parameter count from 8.8M to 15.4M.
 
-% ==================================== %
-%              EVALUATION              %
+    \textbf{Training target.} MAGFiLO images carry up to three independent annotator records, and the experts disagree substantially: clustering their annotations by the evaluation metric's own matching rule, 31.9\% of distinct filaments are marked by fewer than half of the available annotators and only 29.3\% by all of them. We therefore built three detector targets from the same images -- one arbitrary record (\texttt{single}), the filaments a majority marked (\texttt{majority}), and every clustered filament (\texttt{union}) -- and trained the detector separately on each. A marginal analysis puts the PQ break-even annotator support at $\mathrm{PQ}/(2\,\overline{\mathrm{IoU}}) \approx 0.32$, below every support level the dataset contains, which argues for \texttt{union}.
+
+    \textbf{Inference-stage decisions.} The crop context (pad factor); the refiner's mask threshold; the mask-level NMS threshold; a learned candidate re-scorer that predicts a proposal's annotator support from ten shape, photometric and context descriptors and rejects those below a cut; and an additional proposal source, a 0.25M-parameter full-disk semantic segmenter \cite{zhu2025flatunet} whose connected components are merged with the detector's proposals.
+
+    \textbf{Data and preprocessing.} Oriented bounding boxes with a single-pass rotate-crop-segment-unrotate path; $k$-fold cross-validation with copy-paste augmentation; photometric normalization (limb-darkening flattening plus CLAHE) and InstanceNorm in place of BatchNorm, following \citet{hu2026modernconvnet}; flip-4 test-time augmentation, accepted only when the four-view average preserves the single-view mask's topology; and self-training on 2500 additional unlabelled H-$\alpha$ images from the same archive, described in Section~\ref{sec:semisup}.
+
 % ==================================== %
 \section{Evaluation}\label{sec:evaluation}
 
-\subsection{Evaluation strategy}
-    We reproduce the organizers' own Panoptic Quality (PQ) computation locally: predicted and ground-truth instances are matched globally (not per image) by IoU~$>$~0.5, and $\mathrm{PQ} = \sum \mathrm{IoU}(\mathrm{TP}) / (|\mathrm{TP}| + 0.5|\mathrm{FP}| + 0.5|\mathrm{FN}|)$, pooling true/false positives and negatives across the entire validation set rather than averaging a per-image score -- a stricter, more punishing aggregation than a naive per-image mean. Every configuration below was re-tuned over its own detection-confidence threshold before being trusted, since we found repeatedly that a threshold tuned for one model configuration transfers poorly to another.
+\subsection{Evaluation protocol}
+    We reproduce the organizers' Panoptic Quality (PQ) computation locally: predicted and ground-truth instances are matched globally by IoU~$>$~0.5, and $\mathrm{PQ} = \sum \mathrm{IoU}(\mathrm{TP}) / (|\mathrm{TP}| + 0.5|\mathrm{FP}| + 0.5|\mathrm{FN}|)$, pooling across the whole validation set rather than averaging per-image scores. We report the factorization $\mathrm{PQ} = \mathrm{SQ} \times \mathrm{RQ}$ throughout, where SQ is the mean IoU of matched pairs and RQ the detection term, because the two move independently and a single PQ value hides which one binds.
 
-\subsection{Results across explored configurations}
-    Table~\ref{tab:results} summarizes PQ on our held-out validation split for the baseline and every extension from Section~\ref{sec:methodology}. Four of the five extensions plateaued at or below the baseline; only flip-4 TTA improved it, and by a modest but reproducible margin across two independently swept mask-merge thresholds.
-
-    \begin{table}[t]
-      \centering
-      \caption{PQ across explored configurations (held-out validation split).}
-      \label{tab:results}
-      \begin{tabular}{lc}
-        \toprule
-        Configuration & PQ \\
-        \midrule
-        Axis-aligned baseline (YOLO11s + U-Net) & 0.4381 \\
-        \quad + 5-fold CV + copy-paste augmentation & 0.4368 \\
-        \quad + Oriented bounding boxes (OBB) & 0.4207 \\
-        \quad + Ensemble (axis-aligned + OBB) & 0.4321 \\
-        \quad + Photometric normalization (limb + CLAHE) & 0.4248 \\
-        \quad + InstanceNorm & 0.4345 \\
-        \quad + Flip-4 topology-safe TTA (\textbf{adopted}) & \textbf{0.4405} \\
-        \bottomrule
-      \end{tabular}
-    \end{table}
-
-    Our final configuration (axis-aligned baseline with flip-4 TTA) resolves 399 true-positive matches against 674 ground-truth filaments, at a mean IoU of 0.690 among matches and a mean Dice of 0.739 among any nonzero overlap (Figure~\ref{fig:distributions}). Instance-level fragmentation is low: only 2.1\% of ground-truth filaments are split across multiple predictions, and only 3.8\% of predictions merge more than one ground-truth filament, indicating that the mask-level NMS is doing its job of keeping instances cleanly separated.
+    One protocol detail deserves emphasis, because it changed our reported numbers by more than any modelling decision. Ground-truth polygons must be rasterized to masks, and the two obvious ways of doing it disagree. Over all 8199 MAGFiLO annotations, the mean IoU between an \texttt{OpenCV}-filled polygon and the same polygon rasterized through \texttt{pycocotools} -- the convention the evaluation metric itself uses -- is 0.876, with the OpenCV masks systematically larger: 11.1\% of the union area exists only in the OpenCV version against 1.3\% only in the \texttt{pycocotools} one. The discrepancy is a boundary effect, so it scales with the perimeter-to-area ratio and penalizes exactly the thin structures this task is about: mean IoU is 0.850 for filaments below the median area against 0.901 above it (Figure~\ref{fig:raster}). Any metric reported without stating this convention is ambiguous at the level of several points.
 
     \begin{figure}[t]
       \centering
-      \begin{minipage}{0.49\linewidth}
-        \includegraphics[width=\linewidth]{figures/iou_distribution.png}
-      \end{minipage}\hfill
-      \begin{minipage}{0.49\linewidth}
-        \includegraphics[width=\linewidth]{figures/dice_distribution.png}
-      \end{minipage}
-      \caption{IoU and Dice distributions over all matched ground-truth/prediction pairs, final configuration.}
-      \Description{Two histograms, side by side. The left shows the distribution of IoU scores between matched ground-truth and predicted filament instances, with a mean near 0.69. The right shows the corresponding Dice score distribution, with a mean near 0.74.}
-      \label{fig:distributions}
+      \includegraphics[width=\linewidth]{figures/rasterization.pdf}
+      \caption{Two rasterizations of the same annotation polygon disagree systematically, and most on thin filaments.}
+      \Description{Three panels. Left, a grayscale H-alpha crop containing a filament. Centre, the same crop with the pycocotools mask in blue and the pixels present only in the OpenCV mask in red along the boundary. Right, a scatter plot of the IoU between the two rasterizations against filament area on a logarithmic axis, showing agreement rising with size around a mean of 0.876.}
+      \label{fig:raster}
     \end{figure}
 
-    Figure~\ref{fig:examples} shows two representative validation images with predicted instances overlaid against ground truth: agreement is close on well-separated, high-contrast filaments, and the visible disagreements -- a missed short/faint filament, a slightly offset boundary -- are consistent with the quantitative gap described below.
+    Every configuration was re-tuned over its own detection threshold before being trusted, since a threshold tuned for one model transfers poorly to another. We also report a blind check: a second partition of 180 images whose reference annotations are not distributed, scored by a third party, which returns a single PQ value per submission and against which no local choice can be tuned.
+
+\subsection{Ten axes, one result}
+    Figure~\ref{fig:interventions} collects eighteen configurations across six of the axes of Section~\ref{sec:methodology}, all evaluated on the same partition with one implementation of the metric. Eleven fall within $\pm0.009$ of one another, which is the dispersion among configurations the blind check cannot separate. Tripling the detector's parameter count and quadrupling its input pixels changes PQ by 0.0016. Replacing the refiner's encoder with a pretrained ResNet18 raises crop-level validation Dice from 0.8211 to 0.8305 -- a real improvement in mask quality -- and changes PQ by $-0.0011$, because the gain accrues inside crops the detector had already localized well. The three annotator-merge targets span 0.0057. The learned re-scorer discriminates genuinely better than detector confidence (cross-validated AUC 0.845 against 0.777 on the same candidates) and still lands on the same operating point.
+
+    \begin{figure}[t]
+      \centering
+      \includegraphics[width=\linewidth]{figures/interventions.pdf}
+      \caption{Eighteen configurations on six independent axes, same partition and metric. The band marks the reference value plus or minus the dispersion the blind check cannot resolve.}
+      \Description{A dot plot with one row per configuration, grouped by design axis, showing Panoptic Quality on the horizontal axis. Most points fall inside a shaded band around 0.444; the outliers are the configurations that add semantic proposals or apply the re-scorer aggressively.}
+      \label{fig:interventions}
+    \end{figure}
+
+    Seven of these were scored on the blind partition and all returned the same value to two decimal places. That invites the objection that the blind check is simply insensitive, so we tested it in both directions. The configuration of Section~\ref{sec:joint}, predicted in advance to differ because it was the only one whose local margin exceeded the dispersion above, returned a higher value; a semi-supervised model whose local PQ is 0.027 lower returned a lower one. The blind score does track local validation once a difference clears the noise floor, which is what licenses reading the nulls as statements about the interventions rather than about the measurement.
+
+\subsection{The one gain: thresholds interact}\label{sec:joint}
+    Two inference constants had been tuned independently, months apart. The refiner's mask threshold was fixed at 0.8 by a sweep on an earlier pipeline generation whose masks ran 1.45 times too large; the current detector is already well calibrated and its optimum is 0.5. Sweeping either constant while holding the other at its inherited value finds a local optimum the joint sweep does not confirm: the detection threshold that looks best at mask threshold 0.8 is 0.20, and at 0.5 it is 0.25. Retuning both together (Figure~\ref{fig:maskthr}) moves PQ from 0.4436 to 0.4571, an improvement of 0.014 -- larger than any architectural or training change we measured, and roughly 1.5 times the dispersion above. On the blind partition this configuration returns 0.37 against 0.36 for every earlier one.
+
+    The crop's pad factor behaves the same way and more sharply. Swept at inference with a refiner trained at 1.35, PQ falls to 0.379 at pad 1.60 and 0.181 at 2.30: a mismatch of 0.25 costs about 0.08, six times the gain just described. Retraining refiners at 1.60 and 1.80 and evaluating each at its own pad gives 0.4517 and 0.4498 against 0.4571 -- slightly worse, within the noise, with SQ unmoved and an identical 22.1\% ground-truth miss rate. Neither constant is an inference setting at all: both are properties of the trained weights, and reporting either without the model generation it was tuned on publishes a number a reader cannot reuse.
+
+    \begin{figure}[t]
+      \centering
+      \includegraphics[width=\linewidth]{figures/mask_threshold.pdf}
+      \caption{The refiner's mask threshold against PQ (left) and against the ratio of predicted to reference mask area (right). Under a matching rule with an IoU cut, masks that slightly over-cover outperform masks that match the reference in size.}
+      \Description{Two line plots. The left shows Panoptic Quality decreasing as the mask threshold rises from 0.5 to 0.9, for two detection thresholds. The right shows the same points plotted against the ratio of median predicted area to median reference area, with quality still rising past a ratio of one.}
+      \label{fig:maskthr}
+    \end{figure}
+
+\subsection{Unlabelled data does not substitute for labels}\label{sec:semisup}
+    Training-set size is the one variable with a positive effect in our experience, so we asked whether the archive from which MAGFiLO is drawn could stand in for annotation. We downloaded 2500 further H-$\alpha$ images sampled uniformly over 2011--2022 and the six observatories, verifying that none coincides with any MAGFiLO image and in particular none with the blind partition. Pseudo-labels were generated by three selection rules of increasing permissiveness, the detector retrained from scratch on real plus pseudo-labelled images each time, and validation kept to the real held-out images.
+
+    The outcome is governed by how much of each frame the rule chose to label (Figure~\ref{fig:semisup}). At 47\% and 75\% of the real label density the detector learns to stay silent: every real but unlabelled filament is trained as background, the miss rate rises from 21\% to 35--37\%, and false positives halve to the best precision we reached anywhere. At 90\% density the collapse vanishes entirely and the miss rate returns to 20.9\%. What appears at no density is a gain: the best variant returns 0.4453 against 0.4571, with the same false-positive count and fragmentation doubled. Targets generated by a model carry no information that model lacks; below a completeness threshold they destroy recall, and above it they are inert. The methodological point is that a self-training result is uninterpretable without its pseudo-label density, since that single variable spans the entire range we observed.
+
+    \begin{figure}[t]
+      \centering
+      \includegraphics[width=\linewidth]{figures/semisup.pdf}
+      \caption{Self-training outcome against pseudo-label density, same archive and detector throughout; only the rule selecting which instances to label changes.}
+      \Description{Two panels plotting Panoptic Quality and ground-truth miss rate against pseudo-label density in instances per image. Quality is lowest at intermediate density and recovers toward the real-label reference at high density; the miss rate is high and flat below three-quarters of the real density and drops sharply above it.}
+      \label{fig:semisup}
+    \end{figure}
+
+\subsection{Where the residual error lives}
+    The adopted configuration attains $\mathrm{PQ}=0.4571$ with $\mathrm{SQ}=0.674$ and $\mathrm{RQ}=0.678$, missing 22.1\% of reference filaments and producing 18.4\% spurious predictions; 0.6\% of reference filaments are fragmented across predictions and 2.2\% of predictions merge more than one.
+
+    Figure~\ref{fig:failures} decomposes what remains. Recall tracks expert consensus, rising from $0.31 \pm 0.07$ for filaments one expert of three marked to $0.86 \pm 0.06$ for those every available expert confirmed -- the model reproduces the annotators' own uncertainty. It rises with filament area up to the fourth quintile and then falls, so what we miss is predominantly small and faint rather than merely difficult. Most decisively, of the 119 unmatched reference filaments, 67 receive no overlapping proposal at all while 23 sit between IoU 0.40 and the metric's 0.50 cut. Converting the entire near-miss band would be worth about $+0.021$; the majority of the loss is invisible to any refinement of masks the pipeline never proposes. This is why capacity does not help, and it is consistent with the union of two independent proposal sources overlapping 90\% of reference filaments while no filter we could build converts that coverage into PQ. Figure~\ref{fig:examples} shows the qualitative signature: agreement is close on well-separated, high-contrast filaments, and the unmatched references are short and faint.
 
     \begin{figure}[t]
       \centering
       \includegraphics[width=\linewidth]{figures/examples.pdf}
-      \caption{Predicted instances (cyan) against ground truth (red, dashed) on two validation images.}
-      \Description{Two solar disk images with predicted filament outlines in cyan and ground-truth filament outlines in dashed red, overlaid on the H-alpha image. Most filaments show close agreement between the two outlines, with a few ground-truth filaments left unmatched.}
+      \caption{Predicted instances (cyan) against reference annotations (red, dashed) on two validation images. The visible failures are short, faint structures left undetected.}
+      \Description{Two full-disk solar images with predicted filament outlines in cyan and reference outlines in dashed red. Most filaments show close agreement; a few reference outlines appear without a matching prediction.}
       \label{fig:examples}
     \end{figure}
 
-\subsection{Strengths, weaknesses, and possible improvements}
-    ThreadNet's PQ of 0.4405 is well above the value the organizers themselves flagged as practically meaningful (PQ~$>$~0.35), and the pipeline is modular: mask-level NMS is reused, unmodified, both to merge crop-level predictions into one image and to merge predictions from independent detectors in the ensemble variant, and every extension in Section~\ref{sec:methodology} composes with the others through the same handful of function signatures.
+    \begin{figure}[t]
+      \centering
+      \includegraphics[width=\linewidth]{figures/failures.pdf}
+      \caption{Anatomy of the residual error: recall against expert consensus, recall against filament area, and the best IoU achieved for filaments that never matched.}
+      \Description{Three bar charts. The first shows recall rising with the fraction of annotators marking a filament. The second shows recall against filament area by quintile, peaking at the fourth. The third shows that most unmatched reference filaments received no overlapping prediction at all, with a smaller group just below the matching threshold.}
+      \label{fig:failures}
+    \end{figure}
 
-    The main limitation is recall, not mask quality: 26.4\% of ground-truth filaments have no matching prediction at all, while the 15.6\% of predictions with no ground-truth match are comparatively less costly under PQ's aggregation. This is consistent with every extension we tried landing close to the baseline: $k$-fold cross-validation, copy-paste augmentation, an oriented detector, ensembling, and photometric normalization each address mask quality, instance separation, or optimization stability, but none of them directly attacks detector recall on the faintest, shortest filaments -- exactly the failure mode visible in Figure~\ref{fig:examples}. We expect the more promising directions for a future iteration to be ones that target recall directly: additional real (not synthetic) annotated data, an explicit low-confidence recovery pass conditioned on the U-Net's own mask confidence rather than the detector's box confidence alone, or auxiliary supervision on the filament's skeleton/spine to help the detector propose boxes around thin, low-contrast structures it currently misses entirely.
+\subsection{Score and relation distributions}
+    Figure~\ref{fig:distributions} gives the distribution of IoU and Dice over matched reference--prediction pairs for the adopted configuration: 222 matched pairs at a mean IoU of 0.674 and a mean Dice of 0.802. The Dice distribution is concentrated well above 0.7, which is the quantitative form of the statement that mask quality is not the binding constraint.
 
+    Figure~\ref{fig:m2n} gives the distribution of one-to-many and many-to-one correspondences. Structural continuity, which the organizers list among the main challenges of the task, is where this pipeline is strongest: only 0.6\% of reference filaments are split across more than one prediction and only 2.2\% of predictions absorb more than one reference filament. That is a direct consequence of merging instances by mask-level rather than box-level suppression. The remaining mass is one-to-one (77.3\% of references) or unmatched in one direction --- 22.1\% of references receive nothing and 18.4\% of predictions correspond to no reference.
 
+    \begin{figure}[t]
+      \centering
+      \includegraphics[width=\linewidth]{figures/distributions.pdf}
+      \caption{IoU (left) and Dice (right) over the 222 matched reference--prediction pairs of the adopted configuration.}
+      \Description{Two histograms side by side. The left shows intersection-over-union values for matched pairs concentrated between 0.55 and 0.85 with a mean of 0.674. The right shows Dice values concentrated between 0.7 and 0.9 with a mean of 0.802.}
+      \label{fig:distributions}
+    \end{figure}
 
-% ==================================== %
-%            ACKNOWLEDGMENT            %
+    \begin{figure}[t]
+      \centering
+      \includegraphics[width=\linewidth]{figures/m2n_relations.pdf}
+      \caption{Correspondence structure between reference filaments and predictions. Fragmentation and over-merging, the failure modes the challenge description highlights, are both under 2.5\%.}
+      \Description{A bar chart of five categories. Per reference filament: 22.1 percent missed, 77.3 percent matched one to one, 0.6 percent fragmented across several predictions. Per prediction: 18.4 percent spurious, 2.2 percent over-merging more than one reference filament.}
+      \label{fig:m2n}
+    \end{figure}
+
+\subsection{Strengths, weaknesses, and what we would try next}
+    ThreadNet's PQ of 0.4571 is above the value the organizers flagged as practically meaningful ($\mathrm{PQ}>0.35$), and the pipeline is modular: the mask-level NMS, the refiner and the TTA guard are shared unmodified across three detector backends, which is what made a controlled comparison across capacity possible at all. Its mask quality is not the limitation. Measured against the multi-annotator subset, expert pairs agree on a commonly identified filament at a mean IoU of 0.631, while our SQ against held-out annotations is 0.665: the masks already match the reference about as closely as a second expert does, and there is little headroom in boundary placement.
+
+    The limitation is recognition, and specifically detection. Of the filaments we fail to match, 56\% receive no overlapping proposal at all, and they are systematically the small and faint ones -- which are also the ones the annotators themselves are least likely to agree on. Every route we tried for recovering them raised recall and lost PQ, because the false positives arrived faster than the true positives: lowering the detection threshold, adding a second proposal source, and changing the annotator-merge target all show the same signature. A learned discriminator with genuinely better ranking than detector confidence did not change the operating point either.
+
+    Three directions remain that we did not test and would pursue. MAGFiLO distributes a spine polyline for every annotation, which our pipeline never consumes; centreline-aware losses such as clDice \cite{shit2021cldice} exist precisely for structures this thin and would supply gradient where a few-pixel-wide filament currently supplies almost none. Semi-supervision might still work through methods that never commit to a hard label, which our self-training study does not bear on. And every configuration we varied belongs to one architectural family, region proposal followed by crop refinement; query-based instance segmenters were outside our compute budget and our null result does not extend to them.
+
+    Finally, a note on the dataset rather than the model. The MAGFiLO category field records filament chirality, and in aggregate it reproduces the known hemispheric rule -- with the position angle and $B_0$ removed, 67.0\% of northern filaments are dextral and 64.3\% of southern ones sinistral. Chirality is a proxy for the sign of magnetic helicity, it is available at no additional annotation cost, and our pipeline, like every filament segmenter we are aware of, discards it. A segmenter that returned it alongside the outline would be of more operational value than one that returns position alone.
+
 % ==================================== %
 \section{Acknowledgment}\label{sec:acknowledgment}
     % Do not change

@@ -6,9 +6,17 @@ kaggle.json
 
 /bibliography/
 /paper/
+# O artigo para a Solar Physics e trabalho separado, nao faz parte da submissao
 /Marchezi_etal_2026_SolarPhysics_FilamentSegmentation/
-/kaggle_comp_report_fi_segm_Marchezi_2026/
 *.zip
+
+# O relatorio da competicao e rastreado; os artefatos de compilacao dele nao
+kaggle_comp_report_fi_segm_Marchezi_2026/*.aux
+kaggle_comp_report_fi_segm_Marchezi_2026/*.log
+kaggle_comp_report_fi_segm_Marchezi_2026/*.out
+kaggle_comp_report_fi_segm_Marchezi_2026/*.bbl
+kaggle_comp_report_fi_segm_Marchezi_2026/*.blg
+kaggle_comp_report_fi_segm_Marchezi_2026/main_backup.tex
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
