@@ -2,6 +2,10 @@
 /work/
 *.pt
 *.pth
+# ...except the two checkpoints that reproduce the submitted predictions. The rules require
+# the committee to need no file beyond this repository, so these ship with it (88 MB).
+!weights/detector_yolo11seg_2048.pt
+!weights/refiner_unet_edgeatt.pt
 kaggle.json
 
 /bibliography/

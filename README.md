@@ -14,9 +14,23 @@ for an executable, illustrated walkthrough of the whole pipeline.
 
 [`notebooks/pipeline_walkthrough.ipynb`](notebooks/pipeline_walkthrough.ipynb) runs the
 whole thing end to end — data, rasterization convention, detect, crop, refine, stitch,
-evaluate — and regenerates the submitted CSV. Its output is **byte-identical** to the
-submitted file (same SHA-256 over the sorted rows), so nothing outside the repository is
-needed to reproduce the predictions.
+evaluate — and regenerates the submitted CSV.
+
+### Two senses of "reproduce"
+
+They are not the same thing, and the distinction matters when checking this work.
+
+**Re-running inference from the released weights is exact.** Given the two checkpoints and the
+180 test images, the notebook regenerates `submission.csv` **byte for byte** — identical MD5,
+350 507 bytes, 1271 rows. Inference is deterministic: no sampling, and the flip-averaging
+step is a mean over four fixed transforms behind deterministic guards.
+
+**Retraining from scratch is not.** `filament prepare && filament train-yolo --seg &&
+filament train-unet` yields a model of equivalent quality, not the same model: batch order,
+augmentation draws and cuDNN kernel selection all vary between runs, so the resulting CSV will
+differ in a small fraction of instances and its PQ will land within the ±0.009 dispersion we
+measure between indistinguishable configurations. Retraining checks that the *method*
+reproduces; only the released weights reproduce the *submission*.
 
 Originally prototyped as a Kaggle notebook (kept for reference in
 [`notebooks/`](notebooks/)); the pipeline lives as an installable Python
