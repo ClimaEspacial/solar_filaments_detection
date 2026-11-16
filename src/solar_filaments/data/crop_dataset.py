@@ -17,7 +17,7 @@ import torch
 from torch.utils.data import Dataset as TorchDataset
 
 from solar_filaments.data.augment_ops import random_gamma
-from solar_filaments.data.coco import Dataset, load_image, polygon_to_mask
+from solar_filaments.data.coco import spine_to_mask, Dataset, load_image, polygon_to_mask
 from solar_filaments.data.oriented_crop import (apply_affine_points, crop_patch_with_padding,
                                                  minarearect_angle_deg, patch_half_size, pca_angle_deg,
                                                  rotation_matrix)
@@ -111,6 +111,7 @@ class FilamentCropDataset(TorchDataset):
     def __init__(self, dataset: Dataset, train_img_dir, image_ids, crop_size: int,
                  pad_factor: float, min_crop_side: int, augment: bool = False,
                  use_spine_orientation: bool = False, use_obb_orientation: bool = False,
+                 with_spine_target: bool = False, spine_thickness: int = 5,
                  synthetic_img_dir=None, preprocess: bool = False):
         self.dataset = dataset
         self.train_img_dir = train_img_dir
@@ -120,6 +121,8 @@ class FilamentCropDataset(TorchDataset):
         self.min_crop_side = min_crop_side
         self.augment = augment
         self.use_spine_orientation = use_spine_orientation
+        self.with_spine_target = with_spine_target
+        self.spine_thickness = spine_thickness
         self.use_obb_orientation = use_obb_orientation
         self.preprocess = preprocess
         self.samples = [
@@ -139,6 +142,7 @@ class FilamentCropDataset(TorchDataset):
         return self._img_cache[img_id]
 
     def __getitem__(self, idx):
+        spine_t = None
         img_id, ann = self.samples[idx]
         img = self._get_image(img_id)
         H, W = img.shape
@@ -155,14 +159,21 @@ class FilamentCropDataset(TorchDataset):
             x1, y1, x2, y2 = padded_rect_crop(x, y, w, h, W, H, self.pad_factor, self.min_crop_side)
             crop = img[y1:y2, x1:x2]
             mask = full_mask[y1:y2, x1:x2]
+            if self.with_spine_target:
+                sp = spine_to_mask(ann["spine"], H, W, self.spine_thickness)[y1:y2, x1:x2]
+                spine_t, _, _, _ = letterbox_resize(sp, self.crop_size, cv2.INTER_NEAREST)
             crop, _, _, _ = letterbox_resize(crop, self.crop_size, cv2.INTER_LINEAR)
             mask, _, _, _ = letterbox_resize(mask, self.crop_size, cv2.INTER_NEAREST)
 
         if self.augment:
+            # the spine target must ride along with every geometric transform, or the
+            # auxiliary head is trained against a misaligned axis
             if random.random() < 0.5:
                 crop, mask = crop[:, ::-1].copy(), mask[:, ::-1].copy()
+                if spine_t is not None: spine_t = spine_t[:, ::-1].copy()
             if random.random() < 0.5:
                 crop, mask = crop[::-1, :].copy(), mask[::-1, :].copy()
+                if spine_t is not None: spine_t = spine_t[::-1, :].copy()
             if not (self.use_spine_orientation or self.use_obb_orientation):
                 # a 90-degree rotation would undo the whole point of a canonical
                 # horizontal orientation, so skip it in either oriented mode.
@@ -170,8 +181,11 @@ class FilamentCropDataset(TorchDataset):
                 if k:
                     crop = np.rot90(crop, k).copy()
                     mask = np.rot90(mask, k).copy()
+                    if spine_t is not None: spine_t = np.rot90(spine_t, k).copy()
             crop = random_gamma(crop)  # see data/augment_ops.py for the rationale
 
         crop_t = torch.from_numpy(crop).float().unsqueeze(0) / 255.0
         mask_t = torch.from_numpy(mask).float().unsqueeze(0)
-        return crop_t, mask_t
+        if spine_t is None:
+            return crop_t, mask_t
+        return crop_t, mask_t, torch.from_numpy(spine_t).float().unsqueeze(0)

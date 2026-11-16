@@ -20,6 +20,13 @@ def add_args(parser: argparse.ArgumentParser) -> None:
                               "(fine-tuning ImageNet weights at 1e-3 diverges to nan within 3 epochs)")
     parser.add_argument("--base-channels", type=int, default=cfg.base_channels)
     parser.add_argument("--no-edge-attention", action="store_true")
+    parser.add_argument("--spine-loss", type=float, default=0.0,
+                         help="weight of an auxiliary head predicting the filament's medial axis, "
+                              "rasterized from the MAGFiLO spine polyline. 0 disables it. A region "
+                              "loss on a few-pixel-wide structure supplies almost no gradient; the "
+                              "spine says where the filament *runs*. Saves to a _spine-suffixed "
+                              "checkpoint; inference reads the mask channel and ignores the head")
+    parser.add_argument("--spine-thickness", type=int, default=5)
     parser.add_argument("--encoder", choices=ENCODERS, default="base",
                          help="'base' = the scratch EdgeAttUNet encoder (8.8M params, default); "
                               "'resnet18' = ImageNet-pretrained ResNet18 encoder (15.4M), aimed at the "
@@ -72,7 +79,9 @@ def run(args: argparse.Namespace) -> None:
                            use_obb_orientation=args.obb)
     train_crop_ds = FilamentCropDataset(dataset, paths.train_img_dir, train_ids,
                                          crop_cfg.crop_size, crop_cfg.pad_factor, crop_cfg.min_crop_side,
-                                         augment=True, use_spine_orientation=crop_cfg.use_spine_orientation,
+                                         augment=True, with_spine_target=args.spine_loss > 0,
+                                         spine_thickness=args.spine_thickness,
+                                         use_spine_orientation=crop_cfg.use_spine_orientation,
                                          use_obb_orientation=crop_cfg.use_obb_orientation,
                                          synthetic_img_dir=synthetic_img_dir, preprocess=args.normalize)
     val_crop_ds = FilamentCropDataset(dataset, paths.train_img_dir, val_ids,
@@ -89,7 +98,8 @@ def run(args: argparse.Namespace) -> None:
 
     norm_layer = "instance" if args.instance_norm else "batch"
     model = build_refiner(args.encoder, use_edge_attention=not args.no_edge_attention,
-                           norm_layer=norm_layer, base_channels=args.base_channels).to(device)
+                           norm_layer=norm_layer, base_channels=args.base_channels,
+                           out_ch=2 if args.spine_loss > 0 else 1).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"U-Net parameters: {n_params / 1e6:.2f}M")
 
@@ -106,6 +116,8 @@ def run(args: argparse.Namespace) -> None:
         ckpt_stem += "_in"
     if args.encoder != "base":
         ckpt_stem += f"_{args.encoder.replace('resnet', 'r')}"
+    if args.spine_loss > 0:
+        ckpt_stem += "_spine"
     if abs(args.pad_factor - CropConfig().pad_factor) > 1e-6:
         ckpt_stem += f"_pad{int(round(args.pad_factor * 100))}"
     ckpt_name = f"{ckpt_stem}_best.pt"
@@ -120,12 +132,19 @@ def run(args: argparse.Namespace) -> None:
     for epoch in range(args.epochs):
         model.train()
         running_loss = 0.0
-        for crops, masks in train_loader:
-            crops, masks = crops.to(device, non_blocking=True), masks.to(device, non_blocking=True)
+        for batch in train_loader:
+            crops, masks = batch[0].to(device, non_blocking=True), batch[1].to(device, non_blocking=True)
+            spines = batch[2].to(device, non_blocking=True) if len(batch) > 2 else None
             opt.zero_grad(set_to_none=True)
             with torch.amp.autocast(device.type, enabled=device.type == "cuda"):
                 logits = model(crops)
-                loss = bce_dice_loss(logits, masks)
+                if spines is None:
+                    loss = bce_dice_loss(logits, masks)
+                else:
+                    # channel 0 is the mask (the only one used at inference); channel 1 is the
+                    # auxiliary medial-axis head, present only to shape the shared encoder
+                    loss = (bce_dice_loss(logits[:, :1], masks)
+                            + args.spine_loss * bce_dice_loss(logits[:, 1:2], spines))
             scaler.scale(loss).backward()
             # Unscale before clipping so the norm is measured on real gradients. Without
             # this a single bad batch under fp16 sends the loss to nan and it never
@@ -143,7 +162,7 @@ def run(args: argparse.Namespace) -> None:
             with torch.no_grad():
                 for crops, masks in val_loader:
                     crops, masks = crops.to(device), masks.to(device)
-                    logits = model(crops)
+                    logits = model(crops)[:, :1]   # canal 0 = mascara, o unico usado na inferencia
                     val_dice += dice_score(logits, masks) * crops.size(0)
                     n += crops.size(0)
             val_dice /= max(n, 1)

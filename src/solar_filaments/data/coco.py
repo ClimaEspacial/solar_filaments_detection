@@ -93,6 +93,21 @@ def _bbox_of_mask(mask: np.ndarray) -> List[float]:
     return [float(x0), float(y0), float(x1 - x0 + 1), float(y1 - y0 + 1)]
 
 
+def spine_to_mask(spine, height: int, width: int, thickness: int = 5) -> np.ndarray:
+    """Rasterize a MAGFiLO spine polyline into a binary ribbon.
+
+    The spine is the expert-drawn medial axis of the filament. Drawn a few pixels wide it
+    becomes a supervision target for where the structure *runs*, which a region loss on a
+    few-pixel-wide object supplies almost no gradient for."""
+    m = np.zeros((height, width), dtype=np.uint8)
+    pts = np.asarray(spine, dtype=np.float64).reshape(-1, 2)
+    if len(pts) >= 2:
+        cv2.polylines(m, [pts.round().astype(np.int32)], False, 1, thickness=thickness)
+    elif len(pts) == 1:
+        cv2.circle(m, tuple(pts[0].round().astype(int)), thickness // 2, 1, -1)
+    return m
+
+
 def _polygon_of_mask(mask: np.ndarray) -> List[float]:
     """Flat [x0,y0,x1,y1,...] polygon of the largest external contour of `mask`
     (the MAGFiLO single-polygon segmentation format)."""
