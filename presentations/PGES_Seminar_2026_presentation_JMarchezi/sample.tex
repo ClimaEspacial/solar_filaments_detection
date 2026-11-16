@@ -1,0 +1,301 @@
+%----------------------------------------------------------------------------------------
+%    PACKAGES AND THEMES
+%----------------------------------------------------------------------------------------
+\documentclass[aspectratio=169,xcolor=dvipsnames]{beamer}
+\usetheme{CleanEasy}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[T1]{fontenc}
+% \usepackage[brazil]{babel}
+\usepackage{fix-cm}
+\usepackage{amsmath}
+\usepackage{mathtools}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{graphicx} % Allows including images
+\usepackage{booktabs} % Allows the use of \toprule, \midrule and \bottomrule in tables
+\usepackage{tikz}
+\usetikzlibrary{positioning, shapes, arrows, calc, decorations.pathreplacing, arrows.meta, backgrounds, patterns, overlay-beamer-styles}
+\usepackage{etoolbox}
+\usepackage{animate}
+\usepackage{textpos}
+\usepackage{transparent}
+
+%----------------------------------------------------------------------------------------
+%    LAYOUT CONFIGURATION
+%----------------------------------------------------------------------------------------
+\input{configs/configs}
+%----------------------------------------------------------------------------------------
+%    TITLE PAGE
+%----------------------------------------------------------------------------------------
+\input{configs/title_page}
+%----------------------------------------------------------------------------------------
+
+
+\begin{document}
+
+\begin{frame}[plain]
+  \titlepage
+\end{frame}
+
+% \begin{frame}[plain]{Contents}
+%   \tableofcontents
+% \end{frame}
+
+
+
+
+\begin{frame}{Main Research Project}
+\begin{columns}
+    \column{0.6\textwidth}
+    \begin{itemize}
+        \item \textbf{The Influence of Particle Precipitation in the South Atlantic Magnetic Anomaly region on the Geomagnetically Induced Currents}
+        \begin{itemize}
+            \item Rapid fluctuations in of the geomagnetic field Brazil through high-resolution (temporal) magnetometer data. 
+            \item Influence of particle precipitation in the South Atlantic Magnetic Anomaly (SAMA) region on Geomagnetic perturbations. 
+            \item Estimate the contribution of the different frequencies of geomagnetic variations on the Geomagnetically Induced Currents (GIC).
+            \item Develop predictive models to mitigate GIC impacts on low-latitude.
+        \end{itemize}
+    \end{itemize}
+    
+    \column{0.3\textwidth}
+    \begin{figure}
+        \centering
+        \includegraphics[width=1.2\textwidth]{Figures/Picture1.png}
+    \end{figure}
+
+\end{columns}
+
+\end{frame}
+
+
+\section{For High Latitudes}
+
+
+\begin{frame}{MLT and Latitudinal Distribution}
+    \begin{columns}
+        \column{0.5\textwidth}
+            \begin{itemize}
+                \item ICME - Initial Phase: $dB_H/dt$ spikes are broadly dispersed across all MLT (SSC/SI).
+                \item ICME - Main Phase: Activity becomes highly concentrated in an intense post-midnight/dawn hotspot.
+                \item HSS (All Phases): Spikes are consistently dominated by a pre-midnight hotspot (~22 MLT).
+                \item ICMEs produce higher intensity spikes (peaking post-midnight) compared to HSS events (peaking pre-midnight).
+                \item ICMEs and HSSs couple differently with the magnetosphere.
+            \end{itemize}
+        \column{0.5\textwidth}
+            \begin{figure}
+                \centering
+                \includegraphics[width=0.7\textwidth]{Figures/combined_grid_B.pdf}
+            \end{figure}
+            \vspace{-0.7cm}
+%\flushright{\tiny{Marchezi, 2025 (\textit{Preprint})}}
+    \end{columns}
+\end{frame}
+
+\begin{frame}{Solar Cycle Dependency}
+    \begin{columns}
+        \column{0.5\textwidth}
+            \begin{itemize}
+                \item Solar Minima: $dB/dt$ events are most prevalent during the storm recovery phase.
+                \item Solar Maxima: Activity is broader and more intense across all phases, peaking in the main phase  due to ICME-driven sudden.
+                \item Forecasting Implication: Predictive models must account for these cycle-dependent, phase-specific vulnerabilities, such as the heightened $dB/dt$ risk during the recovery phase of storms at solar minimum.
+            \end{itemize}
+        \column{0.5\textwidth}
+            \begin{figure}
+                \centering
+                \includegraphics[width=0.7\textwidth]{Figures/combined_grid_B_solarCycle.pdf}
+            \end{figure}
+            \vspace{-0.7cm}
+%\flushright{\tiny{Marchezi, 2025 (\textit{Preprint})}}
+    \end{columns}
+\end{frame}
+
+\begin{frame}{Side Projects}
+    \begin{columns}
+        \column{0.5\textwidth}
+            \begin{itemize}
+            \item \textbf{Modeling and Forecasting Radiation Belt Electron Flux: A Hybrid kappa-Maxwellian Distribution and Neural Network Approach}
+            \begin{itemize}
+                \item Kappa Distribution
+                \begin{equation*}
+                    f_\kappa(v) = \frac{n}{\left(\pi\kappa\theta^2\right)^{3/2}}\frac{\Gamma(\kappa+1)}{\Gamma(\kappa-1/2)}\left(1+\frac{v^2}{\kappa\theta^2}\right)^{-(\kappa+1)},
+                    \end{equation*}
+                \item Maxwellian
+                    \begin{equation*}\label{eq:maxwellian}
+                    f_M(v) = \frac{n}{\left(2\pi v_{th}^2\right)^{3/2}}\exp{\left(-\frac{v^2}{2v_{th}^2}\right)}.
+                    \end{equation*}
+            \end{itemize}
+        \end{itemize}
+        \column{0.5\textwidth}
+        \begin{figure}
+             \centering
+             \includegraphics[width=0.8\linewidth]{Figures/kappaDistr.png}
+        
+         \end{figure}
+    \end{columns}
+        
+ 
+    
+\end{frame}
+
+
+\begin{frame}{Side Projects}
+
+\begin{figure}
+     \centering
+     \includegraphics[width=0.5\linewidth]{Figures/fits_fig3_4.jpg}
+ \end{figure}
+
+\begin{figure}
+     \centering
+     \includegraphics[width=0.5\linewidth]{Figures/fits_fig5_5.jpg}
+
+ \end{figure}
+\end{frame}
+
+
+\begin{frame}{Combining the distributions}
+\begin{center}
+
+\begin{tabular}{c}
+    
+   \includegraphics[width = 0.7\textwidth]{Figures/real_data_2014-02-15_B.png}  \\
+    \includegraphics[width = 0.7\textwidth]{Figures/fit_data_2014-02-15_B.png}
+\end{tabular}
+    
+\end{center}
+%
+% \begin{figure}[H]
+%     \centering
+%     \includegraphics[width = 0.5\textwidth]{Figures/FitAllDay_20140215.jpg}
+
+% \end{figure}
+
+\end{frame}
+
+\end{document}
+
+
+
+
+\begin{frame}
+\frametitle{Algorithm for Storm Identification (using SYM-H)}
+
+\begin{itemize}
+    \item \textbf{Storm Identification Trigger:} An event is classified as a storm when the SYM-H index reaches \textbf{$-50~\textrm{nT}$} or less.
+
+   
+    \item \textbf{Main Phase Start:} Begins when the SYM-H index reaches the quiet levels prior storm. 
+
+      \item \textbf{Initial Phase Start:} Defined as the point where the index reaches quiet levels \textit{before} its local maximum (the peak before the main phase drop).
+
+    
+    \item \textbf{Recovery Phase Start:} This phase begins exactly at the \textbf{minimum SYM-H value} (the storm's peak).
+
+    \item \textbf{Recovery Phase End:} The storm is considered over when the index returns to \textbf{20\%} of its minimum value OR reaches a quiet level of \textbf{$-15~\textrm{nT}$}.
+\end{itemize}
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Storm Classification by Solar Wind Structure}
+
+\begin{itemize}
+    \item Storms were separated based on the related solar wind structure.
+
+    \item \textbf{Two Main Classifications:}
+    \begin{itemize}
+        \item Interplanetary Coronal Mass Ejections (ICMEs)
+        \item High-Speed Streams (HSSs)
+    \end{itemize}
+
+    \item \textbf{Identification Sources:}
+    \begin{itemize}
+        \item Public catalogs:
+        \begin{itemize}
+            \item Cane and Richardson Lists
+            \item DONKI Database
+        \end{itemize}
+        \item Comparison with other published event lists (Walach \& Grocott, 2019; Pedersen et al., 2024; Juusola et al., 2023; Marchezi et al., 2022)
+        \item Visual analysis of solar wind data (NASA/GSFC OMNIWeb)
+    \end{itemize}
+
+    \item \textbf{Final Event Count:}
+    \begin{itemize}
+        \item \textbf{Total: 623} events
+        \item ICME-driven: 308
+        \item HSS-driven: 315
+    \end{itemize}
+\end{itemize}
+
+\end{frame}
+
+\begin{frame}{Example storms}
+    \begin{tikzpicture}[remember picture, overlay]
+    \node[anchor=south west,inner sep=0] at (1.5,-4) {\includegraphics[width=0.8\textwidth]{Figures/stormsICMEHSS.png}};
+            
+            %\node[anchor=south west,inner sep=0] at (11,-4.1) {\tiny{Marchezi, 2025 (\textit{Preprint})}};
+  \end{tikzpicture}
+
+\end{frame}
+
+
+\section{Results}
+\begin{frame}{Superposed Epoch Analysis}
+    \begin{columns}
+        \column{0.5\textwidth}
+            \begin{figure}
+                \centering
+                \includegraphics[width=0.75\textwidth]{Figures/OMNI_SEA_dBdteventsICME.png}
+            \end{figure}
+        \column{0.5\textwidth}
+            \begin{figure}
+                \centering
+                \includegraphics[width=0.75\textwidth]{Figures/OMNI_SEA_dBdteventsHSS.png}
+            \end{figure}
+    \end{columns}
+    
+\vspace{-0.2cm}
+%\flushright{\tiny{Marchezi, 2025 (\textit{Preprint})}}
+\end{frame}
+
+\begin{frame}{Dataset}
+\begin{columns}
+    \column{0.4\textwidth}
+        \begin{itemize}
+        \item The geomagnetic data is from SuperMag.
+            \begin{itemize}
+                \item Magnetic coordinate system (N), magnetic east (E), and vertical down (Z) 
+            \end{itemize}
+        \item All available stations from 1995 to 2024.
+        \item SYM-H and solar wind data from OMNIWeb.
+    \end{itemize}   
+    \column{0.6\textwidth}
+    \begin{figure}
+        \centering
+        \includegraphics[width=\textwidth]{Figures/good_locs_Supermag.png}
+    \end{figure}
+\end{columns}
+\end{frame}
+
+
+\begin{frame}{MLT Distribution}
+    \begin{columns}
+        \column{0.5\textwidth}
+            \begin{itemize}
+                \item $dB_H/dt$ spike occurrence versus Magnetic Local Time (MLT) for ICME-driven vs. HSS-driven storms.
+                \item Four magnitude thresholds (from $>50$ nT/min to $>300$ nT/min).
+                \item Two main peaks in the pre-midnight (~22 MLT) and dawn (~5 MLT) sectors.ICME vs. 
+                \item ICMEs produce more frequent and higher magnitude spikes than 
+                \item HSS spikes are fewer and more confined to the pre-midnight sector, especially at high magnitudes.
+            \end{itemize}
+        \column{0.5\textwidth}
+            \begin{figure}
+                \centering
+                \includegraphics[width=0.7\textwidth]{Figures/MLT_distribution.png}
+            \end{figure}
+            \vspace{-0.7cm}
+%\flushright{\tiny{Marchezi, 2025 (\textit{Preprint})}}
+    \end{columns}
+\end{frame}
