@@ -12,6 +12,10 @@ kaggle.json
 /paper/
 # O artigo para a Solar Physics e trabalho separado, nao faz parte da submissao
 /Marchezi_etal_2026_SolarPhysics_FilamentSegmentation/
+
+# A apresentacao de seminario e o artigo nao fazem parte da submissao da competicao;
+# o repositorio publico contem apenas o codigo, os pesos e o relatorio.
+/presentations/
 *.zip
 
 # O relatorio da competicao e rastreado; os artefatos de compilacao dele nao
